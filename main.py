@@ -224,8 +224,23 @@ class Plugin:
     async def list_models(self, provider_id: str) -> dict:
         return await self._acall("list_models", provider_id)
 
-    async def set_model_vision(self, provider_id: str, model: str, enabled: bool) -> dict:
+    async def set_model_vision(self, provider_id: str, model: str, enabled: object) -> dict:
         return self._call("set_model_vision", provider_id, model, enabled)
+
+    async def detect_vision(self, provider_id: str, model: str) -> dict:
+        return self._call("detect_vision", provider_id, model)
+
+    async def list_mics(self) -> dict:
+        return self._call("list_mics")
+
+    async def mic_level(self) -> dict:
+        return self._call("mic_level")
+
+    async def test_wake(self) -> dict:
+        return self._call("test_wake")
+
+    async def stop_wake_test(self) -> dict:
+        return self._call("stop_wake_test")
 
     async def send_message(
         self,

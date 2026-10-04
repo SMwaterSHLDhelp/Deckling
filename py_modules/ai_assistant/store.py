@@ -107,6 +107,7 @@ def normalize_hearing(raw: Any) -> dict[str, Any]:
         "thinking_tick": True,
         "thinking_tick_set": False,
         "wake_error": "",
+        "mic_source": "",
         "stt_backend": "",
         "install_message": "",
         "install_progress": 0.0,
@@ -133,6 +134,7 @@ def normalize_hearing(raw: Any) -> dict[str, Any]:
     hearing["wake_model"] = str(hearing["wake_model"] or "hey_jarvis")[:40]
     hearing["stt_model"] = str(hearing["stt_model"] or "tiny.en")[:40]
     hearing["wake_error"] = str(hearing["wake_error"] or "")[:500]
+    hearing["mic_source"] = " ".join(str(hearing.get("mic_source") or "").split())[:180]
     hearing["stt_backend"] = str(hearing["stt_backend"] or "")[:40]
     hearing["install_message"] = str(hearing["install_message"] or "")[:500]
     try:
@@ -305,10 +307,11 @@ class Store:
             self.save_config(config)
             return record
 
-    def set_model_vision(self, provider_id: str, model: str, enabled: bool) -> dict[str, Any]:
+    def set_model_vision(self, provider_id: str, model: str, enabled: object) -> dict[str, Any]:
         chosen = str(model or "").strip()
         if not chosen or len(chosen) > 200:
             raise ValueError("Choose a model before changing whether it can see images")
+        mode = _vision_mode(enabled)
         with self._lock:
             config = self.load_config()
             providers: list[dict[str, Any]] = list(config["providers"])
@@ -316,7 +319,10 @@ class Store:
             if existing is None:
                 raise ValueError("That provider no longer exists")
             overrides = _vision_override(existing.get("vision_override"))
-            overrides[chosen] = bool(enabled)
+            if mode == "auto":
+                overrides.pop(chosen, None)
+            else:
+                overrides[chosen] = mode == "yes"
             if len(overrides) > 40:
                 raise ValueError("Too many vision overrides on this provider")
             existing["vision_override"] = overrides
@@ -762,6 +768,14 @@ def _session_meta(item: dict[str, Any]) -> dict[str, Any]:
     if claude_session:
         meta["claude_session_id"] = claude_session[:200]
     return meta
+
+
+def _vision_mode(value: object) -> str:
+    if value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}:
+        return "yes"
+    if value is False or str(value).strip().lower() in {"0", "false", "no", "off"}:
+        return "no"
+    return "auto"
 
 
 def _vision_override(value: Any) -> dict[str, bool]:

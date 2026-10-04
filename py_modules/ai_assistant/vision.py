@@ -69,17 +69,37 @@ def capabilities_see_images(capabilities: Any) -> bool:
     return any(str(item).strip().lower() in _VISION_CAPS for item in capabilities)
 
 
-def row_sees_images(row: dict[str, Any], props_vision: bool | None = None) -> bool:
-    """True when a model record, llama.cpp /props, or the model name says it takes images."""
+def vision_status(row: dict[str, Any], props_vision: bool | None = None) -> bool | None:
+    """True, False, or None when the record does not say whether the model takes images."""
     if capabilities_see_images(row.get("capabilities")):
         return True
+    architecture = row.get("architecture")
+    if isinstance(architecture, dict):
+        modalities = architecture.get("input_modalities")
+        if isinstance(modalities, list) and modalities:
+            lowered = {str(item).strip().lower() for item in modalities}
+            if "image" in lowered or "vision" in lowered:
+                return True
+            return False
     modalities = row.get("modalities")
-    if isinstance(modalities, dict) and modalities.get("vision") is True:
-        return True
+    if isinstance(modalities, dict) and "vision" in modalities:
+        return bool(modalities.get("vision"))
     name = str(row.get("id") or row.get("name") or row.get("model") or "")
+    lower = name.lower()
+    if lower and any(word in lower for word in _NOT_VISION):
+        return False
     if model_sees_images(name):
         return True
-    return props_vision is True
+    if props_vision is True:
+        return True
+    if props_vision is False:
+        return False
+    return None
+
+
+def row_sees_images(row: dict[str, Any], props_vision: bool | None = None) -> bool:
+    """True when a model record, llama.cpp /props, or the model name says it takes images."""
+    return vision_status(row, props_vision) is True
 
 
 def vision_override_map(provider: dict[str, Any] | None) -> dict[str, bool]:

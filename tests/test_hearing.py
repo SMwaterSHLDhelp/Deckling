@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_assistant.audio_in import capture_command, deck_audio_env
+from ai_assistant.audio_in import capture_command, deck_audio_env, preferred_source, sources_from_pactl
 from ai_assistant.diagnostics import snapshot
 from ai_assistant.hearing import (
     FASTER_WORKER,
@@ -139,7 +139,7 @@ def test_capture_as_root_uses_the_deck_session(monkeypatch) -> None:
     assert "LD_LIBRARY_PATH" not in record_env
     with pytest.raises(RuntimeError, match="PipeWire"):
         capture_command(_which(), euid=1000)
-    with pytest.raises(RuntimeError, match="deck user"):
+    with pytest.raises(RuntimeError, match="login user"):
         capture_command(_which("parec"), euid=0)
 
 
@@ -485,6 +485,27 @@ def test_post_wake_failure_is_isolated_and_recorded(tmp_path) -> None:
     assert engine._phase == "error"
 
 
+def test_sources_skip_monitors_and_use_the_default() -> None:
+    text = (
+        "0\taliases.monitor\talsa_output.pci.monitor\n"
+        "1\talsa_input.usb\tmodule-alsa-source.c\n"
+        "2\talsa_input.built-in\tmodule-alsa-source.c"
+    )
+    sources = sources_from_pactl(text, "alsa_input.built-in")
+    assert [item["name"] for item in sources] == ["alsa_input.usb", "alsa_input.built-in"]
+    assert preferred_source(sources, "") == "alsa_input.built-in"
+    assert preferred_source(sources, "alsa_input.usb") == "alsa_input.usb"
+    assert preferred_source(sources, "missing") == "alsa_input.built-in"
+    monitor_default = sources_from_pactl(text, "aliases.monitor")
+    assert preferred_source(monitor_default, "") == "alsa_input.usb"
+    argv, _env = capture_command(_which("parec"), euid=1000, source="alsa_input.built-in")
+    assert "--device=alsa_input.built-in" in argv
+    assert "--rate=16000" in argv
+    assert "--channels=1" in argv
+    bare, _env = capture_command(_which("parec"), euid=1000, source="")
+    assert not any(part.startswith("--device=") for part in bare)
+
+
 def test_frontend_listening_controls_and_no_bundled_models() -> None:
     hearing = Path("src/hearing.ts").read_text(encoding="utf-8")
     screen = Path("src/screenHelp.ts").read_text(encoding="utf-8")
@@ -497,6 +518,9 @@ def test_frontend_listening_controls_and_no_bundled_models() -> None:
     assert "Stop listening" in panel
     assert "Wake word sensitivity" in settings
     assert "hey deckling" in settings
+    assert "Test wake word" in settings
+    assert "Input level" in settings
+    assert "Microphone: system default" in settings
     root = Path(".")
     skipped = {"node_modules", ".git", "dist", "out", ".venv"}
     bundled = []

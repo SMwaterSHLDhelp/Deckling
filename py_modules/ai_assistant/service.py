@@ -32,6 +32,7 @@ from .vision import (
     model_can_see,
     model_sees_images,
     vision_ids,
+    vision_status,
 )
 from .voice import SPOKEN_STYLE, VoiceEngine
 from .web import WebClient, normalize_web, public_web
@@ -58,6 +59,18 @@ class _NullHost:
 
     def warning(self, message: str, *args: object) -> None:
         logging.getLogger("deckling").warning(message, *args)
+
+
+def _named_status(model: str, status: str) -> str:
+    """A known model name still counts when the server list did not say."""
+    if status != "unknown":
+        return status
+    named = vision_status({"id": model}, None)
+    if named is True:
+        return "yes"
+    if named is False:
+        return "no"
+    return "unknown"
 
 
 def _fail(message: str) -> dict[str, Any]:
@@ -363,10 +376,32 @@ class AssistantService:
             self.host.warning("Model list failed kind=%s: %s", provider.get("kind"), message)
             self.store.set_connection(provider_id, "error", message)
             return _fail(message)
-        shown = models[:80]
+        shown = models[:200]
+        auto = {item: report.auto.get(item, "unknown") for item in shown}
+        for item in shown:
+            if auto[item] != "unknown":
+                continue
+            cached = self._cached_probe(provider_id, item)
+            if cached is True:
+                auto[item] = "yes"
+            elif cached is False:
+                auto[item] = "no"
+        seen = {item for item, status in auto.items() if status == "yes"}
+        modes = {
+            item: ("yes" if (provider.get("vision_override") or {}).get(item) is True else "no")
+            if item in (provider.get("vision_override") or {})
+            else "auto"
+            for item in shown
+        }
         detail = f"Connected. {len(models)} model{'s' if len(models) != 1 else ''} available."
         self.store.set_connection(provider_id, "connected", detail)
-        return {"ok": True, "models": shown, "vision_models": vision_ids(shown, provider, seen)}
+        return {
+            "ok": True,
+            "models": shown,
+            "vision_models": vision_ids(shown, provider, seen),
+            "vision_auto": auto,
+            "vision_modes": modes,
+        }
 
     def start_chat(
         self,
@@ -713,17 +748,85 @@ class AssistantService:
         key = (str(provider.get("id") or provider.get("base_url") or ""), chosen)
         if key in self._vision_cache:
             return self._vision_cache[key]
-        auto: set[str] = set()
-        described = False
+        status = "unknown"
         try:
-            auto = set(providers.describe_models(provider).vision)
-            described = True
+            report = providers.describe_models(provider)
+            status = report.auto.get(chosen, "unknown")
         except (HttpError, ValueError, OSError, ClaudeCodeError):
-            auto = set()
-        seen = model_can_see(provider, chosen, auto)
-        if described:
+            status = "unknown"
+        status = _named_status(chosen, status)
+        if status == "unknown":
+            cached = self._cached_probe(str(provider.get("id") or ""), chosen)
+            if cached is None and chosen:
+                probed = providers.probe_sees_images(provider, chosen)
+                if probed is not None:
+                    self._store_probe(str(provider.get("id") or ""), chosen, probed)
+                    cached = probed
+            if cached is True:
+                status = "yes"
+            elif cached is False:
+                status = "no"
+        seen = status == "yes" or (status == "unknown" and model_can_see(provider, chosen, set()))
+        if status != "unknown":
             self._vision_cache[key] = seen
         return seen
+
+    def _probe_file(self) -> str:
+        return os.path.join(self.store.runtime_dir, "vision-probes.json")
+
+    def _cached_probe(self, provider_id: str, model: str) -> bool | None:
+        try:
+            with open(self._probe_file(), encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        value = data.get(f"{provider_id}|{model}")
+        return value if isinstance(value, bool) else None
+
+    def _store_probe(self, provider_id: str, model: str, seen: bool) -> None:
+        path = self._probe_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data[f"{provider_id}|{model}"] = bool(seen)
+        temporary = path + ".partial"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(temporary, path)
+
+    def detect_vision(self, provider_id: str, model: str) -> dict[str, Any]:
+        provider = self.store.get_provider(provider_id)
+        chosen = str(model or "").strip()
+        overrides = provider.get("vision_override") if isinstance(provider.get("vision_override"), dict) else {}
+        mode = "yes" if overrides.get(chosen) is True else "no" if chosen in overrides else "auto"
+        status = "unknown"
+        try:
+            status = providers.describe_models(provider).auto.get(chosen, "unknown")
+        except (HttpError, ValueError, OSError, ClaudeCodeError):
+            status = "unknown"
+        status = _named_status(chosen, status)
+        if status == "unknown" and mode == "auto" and chosen:
+            cached = self._cached_probe(provider_id, chosen)
+            if cached is None:
+                probed = providers.probe_sees_images(provider, chosen)
+                if probed is not None:
+                    self._store_probe(provider_id, chosen, probed)
+                    cached = probed
+            if cached is True:
+                status = "yes"
+            elif cached is False:
+                status = "no"
+        sees = mode == "yes" or (mode == "auto" and (status == "yes" or (status == "unknown" and model_sees_images(chosen))))
+        label = {"yes": "sees images", "no": "text only"}.get(status, "not sure yet")
+        self._vision_cache[(provider_id, chosen)] = sees
+        return {"ok": True, "mode": mode, "detected": status, "label": label, "sees": sees}
 
     def _offer_screen_tool(self, provider: dict[str, Any], chosen: str) -> bool:
         if not bool(normalize_voice(self.store.load_config().get("voice"))["screen_capture"]):
@@ -762,9 +865,22 @@ class AssistantService:
             return SPOKEN_STYLE
         return base + "\n\n" + SPOKEN_STYLE
 
-    def set_model_vision(self, provider_id: str, model: str, enabled: bool) -> dict[str, Any]:
+    def set_model_vision(self, provider_id: str, model: str, enabled: object) -> dict[str, Any]:
         record = self.store.set_model_vision(provider_id, model, enabled)
-        return {"ok": True, "provider": public_provider(record)}
+        self._vision_cache.pop((provider_id, str(model or "").strip()), None)
+        return {"ok": True, "provider": public_provider(record), **self.detect_vision(provider_id, model)}
+
+    def list_mics(self) -> dict[str, Any]:
+        return self.hearing.list_mics()
+
+    def mic_level(self) -> dict[str, Any]:
+        return self.hearing.mic_level()
+
+    def test_wake(self) -> dict[str, Any]:
+        return self.hearing.start_wake_test()
+
+    def stop_wake_test(self) -> dict[str, Any]:
+        return self.hearing.stop_wake_test()
 
     def _text_only(self, provider: dict[str, Any], chosen: str) -> dict[str, Any]:
         suggestions: list[str] = []

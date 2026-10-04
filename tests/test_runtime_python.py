@@ -10,10 +10,10 @@ from pathlib import Path
 
 from ai_assistant import runtime_python
 from ai_assistant.hearing import HearingEngine
-from ai_assistant.providers import _models_from_openai_payload
+from ai_assistant.providers import ModelReport, _models_from_openai_payload
 from ai_assistant.service import AssistantService
 from ai_assistant.store import Store
-from ai_assistant.vision import model_can_see, row_sees_images
+from ai_assistant.vision import model_can_see, row_sees_images, vision_status
 
 
 def _sha256(path: Path) -> str:
@@ -156,9 +156,10 @@ def test_llamacpp_capabilities_and_props_mark_vision_and_override_wins(tmp_path)
             }
         ]
     }
-    ids, seen = _models_from_openai_payload(payload, None)
+    ids, seen, auto = _models_from_openai_payload(payload, None)
     assert ids == ["qwen3.8-flash-next"]
     assert seen == ["qwen3.8-flash-next"]
+    assert auto["qwen3.8-flash-next"] == "yes"
     assert row_sees_images({"name": "plain"}, True) is True
     assert row_sees_images({"name": "plain", "capabilities": ["completion"]}, False) is False
     provider = {"vision_override": {"qwen3.8-flash-next": False, "text-only": True}}
@@ -173,3 +174,63 @@ def test_llamacpp_capabilities_and_props_mark_vision_and_override_wins(tmp_path)
     assert updated["provider"]["vision_override"]["qwen3.8-flash-next"] is True
     stored = service.store.get_provider(saved["provider"]["id"])
     assert model_can_see(stored, "qwen3.8-flash-next", set()) is True
+
+
+def test_model_lists_accept_data_ids_and_model_names() -> None:
+    ids, _seen, auto = _models_from_openai_payload({"models": ["qwen3.8-flash-next"]}, None)
+    assert ids == ["qwen3.8-flash-next"]
+    assert auto["qwen3.8-flash-next"] == "unknown"
+    ids, seen, auto = _models_from_openai_payload(
+        {"data": [{"id": "openai/gpt-4o", "architecture": {"input_modalities": ["text", "image"]}}]},
+        None,
+    )
+    assert seen == ["openai/gpt-4o"]
+    assert auto["openai/gpt-4o"] == "yes"
+    ids, _seen, auto = _models_from_openai_payload(
+        {
+            "data": [{"id": "text-only", "architecture": {"input_modalities": ["text"]}}],
+            "models": ["extra-model"],
+        },
+        None,
+    )
+    assert ids == ["text-only"]
+    assert auto["text-only"] == "no"
+    assert vision_status({"id": "gemini-2.5-flash"}, None) is True
+    assert vision_status({"id": "claude-sonnet-4-5"}, None) is True
+    assert vision_status({"id": "grok-4.7"}, None) is True
+    assert vision_status({"id": "text-embedding-3-small"}, None) is False
+    assert vision_status({"modalities": {"vision": False}}, None) is False
+    assert vision_status({"id": "qwen3.8-flash-next"}, None) is None
+
+
+def test_auto_vision_is_the_default_and_a_probe_is_cached(tmp_path, monkeypatch) -> None:
+    service = AssistantService(str(tmp_path / "settings"), str(tmp_path / "runtime"))
+    saved = service.save_provider(
+        {"kind": "llamacpp", "name": "Home", "base_url": "http://127.0.0.1:9/v1", "default_model": "qwen3.8-flash-next"}
+    )
+    provider_id = saved["provider"]["id"]
+    assert "qwen3.8-flash-next" not in (saved["provider"].get("vision_override") or {})
+
+    def describe(_provider):
+        return ModelReport(["qwen3.8-flash-next"], [], {"qwen3.8-flash-next": "unknown"})
+
+    probes = {"n": 0}
+
+    def probe(_provider, _model):
+        probes["n"] += 1
+        return False
+
+    monkeypatch.setattr("ai_assistant.service.providers.describe_models", describe)
+    monkeypatch.setattr("ai_assistant.service.providers.probe_sees_images", probe)
+    first = service.detect_vision(provider_id, "qwen3.8-flash-next")
+    second = service.detect_vision(provider_id, "qwen3.8-flash-next")
+    assert probes["n"] == 1
+    assert first["mode"] == "auto"
+    assert first["detected"] == "no"
+    assert first["sees"] is False
+    assert second["detected"] == "no"
+
+    turned_off = service.store.set_model_vision(provider_id, "qwen3.8-flash-next", "no")
+    assert turned_off["vision_override"]["qwen3.8-flash-next"] is False
+    cleared = service.store.set_model_vision(provider_id, "qwen3.8-flash-next", "auto")
+    assert "qwen3.8-flash-next" not in cleared["vision_override"]

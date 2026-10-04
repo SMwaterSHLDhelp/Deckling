@@ -119,13 +119,30 @@ export const testProvider = deckyCall<
   [providerId: string],
   OkResult & { message?: string; models?: string[]; vision_models?: string[]; status?: number; latency_ms?: number }
 >("test_provider");
-export const listModels = deckyCall<[providerId: string], OkResult & { models?: string[]; vision_models?: string[] }>(
-  "list_models",
-);
+export const listModels = deckyCall<
+  [providerId: string],
+  OkResult & {
+    models?: string[];
+    vision_models?: string[];
+    vision_auto?: Record<string, string>;
+    vision_modes?: Record<string, string>;
+  }
+>("list_models");
 export const setModelVision = deckyCall<
-  [providerId: string, model: string, enabled: boolean],
-  OkResult & { provider?: PublicProvider }
+  [providerId: string, model: string, mode: string],
+  OkResult & { provider?: PublicProvider; mode?: string; detected?: string; label?: string; sees?: boolean }
 >("set_model_vision");
+export const detectVision = deckyCall<
+  [providerId: string, model: string],
+  OkResult & { mode?: string; detected?: string; label?: string; sees?: boolean }
+>("detect_vision");
+export const listMics = deckyCall<[], OkResult & { mics?: { name: string; label: string; default?: boolean }[]; selected?: string }>(
+  "list_mics",
+  true,
+);
+export const micLevel = deckyCall<[], OkResult & { level?: number; source?: string }>("mic_level", true);
+export const testWake = deckyCall<[], OkResult & { hearing?: HearingSettings }>("test_wake");
+export const stopWakeTest = deckyCall<[], OkResult & { hearing?: HearingSettings }>("stop_wake_test");
 export const sendMessage = deckyCall<
   [providerId: string, model: string, content: string, requestId: string, aboutGame: string],
   OkResult & { messages?: AppState["messages"]; sessions?: SessionSummary[] }

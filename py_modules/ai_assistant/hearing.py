@@ -22,7 +22,7 @@ import wave
 from collections.abc import Callable
 from typing import Any
 
-from .audio_in import capture_command, deck_audio_env
+from .audio_in import capture_command, deck_audio_env, list_input_sources, preferred_source
 from .diagnostics import remember
 from .http_util import USER_AGENT
 from .interpreter import frozen_runtime
@@ -100,8 +100,9 @@ def main() -> None:
         audio = np.frombuffer(chunk, dtype=np.int16)
         scores = model.predict(audio)
         best = max((float(value) for value in scores.values()), default=0.0)
-        if best >= threshold:
-            sys.stdout.write(json.dumps({"wake": True, "score": round(best, 4)}) + "\\n")
+        heard = best >= threshold
+        if heard or os.environ.get("DECKLING_WAKE_REPORT") == "1":
+            sys.stdout.write(json.dumps({"wake": heard, "score": round(best, 4)}) + "\\n")
             sys.stdout.flush()
 
 if __name__ == "__main__":
@@ -363,6 +364,8 @@ class HearingEngine:
         self._sleeping = False
         self._busy = False
         self._last_failure = ""
+        self._test_stop = threading.Event()
+        self._test_thread: threading.Thread | None = None
 
     def public(self) -> dict[str, Any]:
         try:
@@ -509,6 +512,9 @@ class HearingEngine:
             self.report_failure(RuntimeError(self.public()["wake_error"]))
             self._stop.wait(2)
         while not self._stop.is_set():
+            if self._test_thread is not None and self._test_thread.is_alive():
+                self._stop.wait(0.3)
+                continue
             if self._paused():
                 self._set_phase("paused", "Listening is paused")
                 self._stop.wait(1)
@@ -656,8 +662,8 @@ class HearingEngine:
         env["DECKLING_WAKE_MODEL"] = model
         env["DECKLING_MODEL_DIR"] = os.path.dirname(model)
         env["DECKLING_WAKE_THRESHOLD"] = str(threshold_for(self.public()["sensitivity"]))
-        capture, capture_env = capture_command(self.which)
-        mic = self.popen(capture, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=capture_env)
+        capture, capture_env = capture_command(self.which, source=self._input_source())
+        mic = self.popen(capture, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=capture_env)
         brain = self.popen(
             self._argv(worker),
             stdin=mic.stdout,
@@ -677,12 +683,160 @@ class HearingEngine:
                 payload = json.loads(line.decode("utf-8", "replace"))
             except (UnicodeError, json.JSONDecodeError, ValueError):
                 return False
-            return bool(isinstance(payload, dict) and payload.get("wake"))
+            woke = bool(isinstance(payload, dict) and payload.get("wake"))
+            if not woke:
+                self._note_mic_error(mic)
+            return woke
         finally:
             self._stop_procs()
 
+    def _input_source(self) -> str:
+        saved = str(self.public().get("mic_source") or "")
+        try:
+            sources = list_input_sources(self.which)
+        except Exception:
+            sources = []
+        return preferred_source(sources, saved)
+
+    def list_mics(self) -> dict[str, Any]:
+        try:
+            sources = list_input_sources(self.which)
+        except Exception as exc:
+            return {"ok": False, "error": _failure_text(exc), "mics": []}
+        return {
+            "ok": True,
+            "mics": sources,
+            "selected": preferred_source(sources, str(self.public().get("mic_source") or "")),
+        }
+
+    def mic_level(self) -> dict[str, Any]:
+        source = self._input_source()
+        try:
+            argv, env = capture_command(self.which, source=source)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "level": 0}
+        proc = self.popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        try:
+            assert proc.stdout is not None
+            chunk = proc.stdout.read(RATE * 2 // 5)
+        finally:
+            _kill(proc)
+        if not chunk:
+            err = b""
+            if proc.stderr is not None:
+                try:
+                    err = proc.stderr.read(300)
+                except Exception:
+                    err = b""
+            detail = err.decode("utf-8", "replace").strip()
+            if detail:
+                return {"ok": False, "error": detail[:300], "level": 0, "source": source}
+        peak = rms(chunk) / 32767 if chunk else 0.0
+        return {"ok": True, "level": round(min(1.0, peak), 3), "source": source}
+
+    def start_wake_test(self) -> dict[str, Any]:
+        self._test_stop.set()
+        self._stop_procs()
+        previous = self._test_thread
+        if previous is not None and previous.is_alive():
+            previous.join(timeout=2)
+        self._test_stop = threading.Event()
+        self._test_thread = threading.Thread(target=self._wake_test, name="deckling-wake-test", daemon=True)
+        self._test_thread.start()
+        return {"ok": True, "hearing": self.public()}
+
+    def stop_wake_test(self) -> dict[str, Any]:
+        self._test_stop.set()
+        self._stop_procs()
+        return {"ok": True, "hearing": self.public()}
+
+    def _wake_test(self) -> None:
+        try:
+            if not os.path.isfile(self._model_path(self.public()["wake_model"])):
+                self.install()
+        except Exception as exc:
+            self.report_failure(exc)
+            return
+        self._set_phase("listening", "Say the wake word")
+        worker = self._write_worker("wake_worker.py", WAKE_WORKER)
+        model = self._model_path(self.public()["wake_model"])
+        env = os.environ.copy()
+        env.pop("LD_LIBRARY_PATH", None)
+        env["PYTHONPATH"] = self._target()
+        env["DECKLING_WAKE_MODEL"] = model
+        env["DECKLING_MODEL_DIR"] = os.path.dirname(model)
+        env["DECKLING_WAKE_THRESHOLD"] = str(threshold_for(self.public()["sensitivity"]))
+        env["DECKLING_WAKE_REPORT"] = "1"
+        try:
+            capture, capture_env = capture_command(self.which, source=self._input_source())
+        except RuntimeError as exc:
+            self.report_failure(exc)
+            return
+        mic = self.popen(capture, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=capture_env)
+        brain = self.popen(
+            self._argv(worker),
+            stdin=mic.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        with self._lock:
+            self._procs.extend([mic, brain])
+        deadline = time.monotonic() + 15
+        try:
+            assert brain.stdout is not None
+            while not self._test_stop.is_set() and time.monotonic() < deadline:
+                line = brain.stdout.readline()
+                if not line:
+                    self._note_mic_error(mic)
+                    err = b""
+                    if brain.stderr is not None:
+                        try:
+                            err = brain.stderr.read(300)
+                        except Exception:
+                            err = b""
+                    detail = err.decode("utf-8", "replace").strip()
+                    if detail:
+                        self._surface(detail)
+                    break
+                try:
+                    payload = json.loads(line.decode("utf-8", "replace"))
+                except (UnicodeError, json.JSONDecodeError, ValueError):
+                    continue
+                score = payload.get("score")
+                heard = bool(payload.get("wake"))
+                self.notify(
+                    {
+                        "type": "hearing",
+                        "phase": "wake_score",
+                        "message": f"Score {score}" + (" · heard the wake word" if heard else ""),
+                        "score": score,
+                    }
+                )
+        except Exception as exc:
+            self.report_failure(exc)
+        finally:
+            self._stop_procs()
+            phase = "listening" if self.public()["wake_enabled"] and not self._paused() else "off"
+            self._set_phase(phase, "")
+
+    def _note_mic_error(self, proc: Any) -> None:
+        code = getattr(proc, "returncode", None)
+        if code in {None, 0}:
+            return
+        err = b""
+        if getattr(proc, "stderr", None) is not None:
+            try:
+                err = proc.stderr.read(300)
+            except Exception:
+                err = b""
+        detail = err.decode("utf-8", "replace").strip()
+        if detail:
+            self._surface(detail)
+
     def _record(self) -> bytes:
-        argv, env = capture_command(self.which)
+        argv, env = capture_command(self.which, source=self._input_source())
         proc = self.popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
         with self._lock:
             self._procs.append(proc)

@@ -1,9 +1,10 @@
+import { addEventListener, removeEventListener } from "@decky/api";
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { useEffect, useState } from "react";
-import { getState, saveHearing } from "../api";
+import { getState, listMics, micLevel, saveHearing, stopWakeTest, testWake } from "../api";
 import { DeckRow } from "../DeckRow";
 import { errorMessage } from "../retry";
-import type { HearingSettings } from "../types";
+import type { BackendEvent, HearingSettings } from "../types";
 
 export function HearingSection({
   hearing,
@@ -29,8 +30,49 @@ export function HearingSection({
 
   const percent = Math.round(hearing.sensitivity * 100);
   const [about, setAbout] = useState(false);
+  const [mics, setMics] = useState<{ name: string; label: string; default?: boolean }[]>([]);
+  const [level, setLevel] = useState(0);
+  const [score, setScore] = useState("");
+  const [testing, setTesting] = useState(false);
   const progress = Math.round((hearing.install_progress || 0) * 100);
   const installing = Boolean(hearing.install_message) && progress > 0 && progress < 100;
+
+  useEffect(() => {
+    let cancelled = false;
+    void listMics().then((result) => {
+      if (!cancelled && result.ok) {
+        setMics(result.mics || []);
+      }
+    });
+    if (testing) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    const timer = window.setInterval(() => {
+      void micLevel().then((result) => {
+        if (result.ok && typeof result.level === "number") {
+          setLevel(result.level);
+        }
+      });
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hearing.mic_source, testing]);
+
+  useEffect(() => {
+    const listener = addEventListener<[BackendEvent]>("deckling_event", (event) => {
+      if (event.type === "hearing" && event.phase === "wake_score") {
+        setScore(event.message || (typeof event.score === "number" ? `Score ${event.score}` : ""));
+      }
+      if (event.type === "hearing" && event.phase === "error" && event.message) {
+        onError(event.message);
+      }
+    });
+    return () => removeEventListener("deckling_event", listener);
+  }, [onError]);
 
   useEffect(() => {
     if (!hearing.wake_enabled || !installing) {
@@ -54,6 +96,47 @@ export function HearingSection({
       <DeckRow layout="below" onClick={() => void save({ wake_enabled: !hearing.wake_enabled })}>
         {hearing.wake_enabled ? "Wake word: on" : "Wake word: off"}
       </DeckRow>
+      <DeckRow layout="below" onClick={() => void save({ mic_source: "" })}>
+        {hearing.mic_source ? `Microphone: ${hearing.mic_source}` : "Microphone: system default"}
+      </DeckRow>
+      {mics.map((mic) => (
+        <DeckRow key={mic.name} layout="below" onClick={() => void save({ mic_source: mic.name })}>
+          {hearing.mic_source === mic.name || (!hearing.mic_source && mic.default)
+            ? `Using ${mic.label}`
+            : mic.label}
+        </DeckRow>
+      ))}
+      <PanelSectionRow>
+        <div>{`Input level ${Math.round(level * 100)}%`}</div>
+        <div style={{ height: "8px", background: "#1b2836", borderRadius: "4px", marginTop: "6px" }}>
+          <div style={{ width: `${Math.round(level * 100)}%`, height: "8px", background: "#7fd1c3", borderRadius: "4px" }} />
+        </div>
+      </PanelSectionRow>
+      <DeckRow
+        layout="below"
+        onClick={() => {
+          if (testing) {
+            setTesting(false);
+            void stopWakeTest();
+            return;
+          }
+          setTesting(true);
+          setScore("Listening for the wake word…");
+          void testWake().then((result) => {
+            if (!result.ok) {
+              setTesting(false);
+              onError(result.error || "Could not test the wake word");
+            }
+          });
+        }}
+      >
+        {testing ? "Stop wake word test" : "Test wake word"}
+      </DeckRow>
+      {score ? (
+        <PanelSectionRow>
+          <div>{score}</div>
+        </PanelSectionRow>
+      ) : null}
       {hearing.wake_enabled ? (
         <>
           <PanelSectionRow>

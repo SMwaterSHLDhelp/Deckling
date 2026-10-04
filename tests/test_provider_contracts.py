@@ -205,7 +205,11 @@ def test_ollama_reads_tags_and_streams_chat_lines() -> None:
     assert models == ["llama3:latest"]
     assert text == "hello"
     assert "authorization" not in calls[0]["headers"]
-    posted = _json_body(calls[1])
+    show = [call for call in calls if call["path"] == "/api/show"]
+    assert show
+    chat = [call for call in calls if call["path"] == "/api/chat"]
+    assert chat
+    posted = _json_body(chat[0])
     assert posted["model"] == "chosen-model"
     assert posted["stream"] is True
     assert posted["options"] == {"num_predict": 64}

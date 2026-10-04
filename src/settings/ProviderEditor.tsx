@@ -7,6 +7,7 @@ import {
   deleteProvider,
   listModels,
   oauthStatus,
+  detectVision,
   setModelVision,
   saveProvider,
   startOAuth,
@@ -107,6 +108,8 @@ export function ProviderEditor({
   const [oauth, setOauth] = useState({ status: "", message: "", userCode: "", url: "" });
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [visionChoices, setVisionChoices] = useState<string[]>([]);
+  const [visionAuto, setVisionAuto] = useState<Record<string, string>>({});
+  const [visionModes, setVisionModes] = useState<Record<string, string>>({});
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const [modelReload, setModelReload] = useState(0);
@@ -171,6 +174,8 @@ export function ProviderEditor({
         const found = result.models || [];
         setModelChoices(found);
         setVisionChoices(result.vision_models || []);
+        setVisionAuto(result.vision_auto || {});
+        setVisionModes(result.vision_modes || {});
         setDraft((prev) => {
           if (!prev || prev.id !== providerId || prev.default_model.trim() || found.length === 0) {
             return prev;
@@ -195,6 +200,36 @@ export function ProviderEditor({
       cancelled = true;
     };
   }, [draft.id, modelReload]);
+
+  const visionAttempted = useRef(new Set<string>());
+  useEffect(() => {
+    const model = draft.default_model.trim();
+    const providerId = draft.id;
+    if (!providerId || !model || (visionModes[model] || "auto") !== "auto") {
+      return;
+    }
+    if (visionAuto[model] && visionAuto[model] !== "unknown") {
+      return;
+    }
+    const key = `${providerId}|${model}`;
+    if (visionAttempted.current.has(key)) {
+      return;
+    }
+    visionAttempted.current.add(key);
+    let cancelled = false;
+    void detectVision(providerId, model).then((result) => {
+      if (cancelled || !result.ok || !result.detected) {
+        return;
+      }
+      setVisionAuto((auto) => ({ ...auto, [model]: result.detected || "unknown" }));
+      if (result.sees) {
+        setVisionChoices((choices) => (choices.includes(model) ? choices : [...choices, model]));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.default_model, draft.id, visionAuto, visionModes]);
 
   const selectKind = (nextKind: ProviderKindInfo) => {
     setDraft((prev) => {
@@ -469,25 +504,26 @@ export function ProviderEditor({
             if (!draft.id || !draft.default_model) {
               return;
             }
-            const enabled = !visionChoices.includes(draft.default_model);
-            void setModelVision(draft.id, draft.default_model, enabled).then((result) => {
+            const current = visionModes[draft.default_model] || "auto";
+            const next = current === "auto" ? "yes" : current === "yes" ? "no" : "auto";
+            void setModelVision(draft.id, draft.default_model, next).then((result) => {
               if (!result.ok) {
                 setModelsError(result.error || "Could not save image support");
                 return;
               }
-              setVisionChoices((current) =>
-                enabled
-                  ? [...current.filter((id) => id !== draft.default_model), draft.default_model]
-                  : current.filter((id) => id !== draft.default_model),
+              setVisionModes((modes) => ({ ...modes, [draft.default_model]: result.mode || next }));
+              if (result.detected) {
+                setVisionAuto((auto) => ({ ...auto, [draft.default_model]: result.detected || "unknown" }));
+              }
+              setVisionChoices((choices) =>
+                result.sees
+                  ? [...choices.filter((id) => id !== draft.default_model), draft.default_model]
+                  : choices.filter((id) => id !== draft.default_model),
               );
             });
           }}
         >
-          {!draft.default_model
-            ? "Pick a model to set image support"
-            : visionChoices.includes(draft.default_model)
-              ? "This model can see images"
-              : "This model cannot see images"}
+          {visionLabel(draft.default_model, visionModes, visionAuto)}
         </DeckRow>
         </div>
         <PanelSectionRow>
@@ -625,6 +661,22 @@ export function ProviderEditor({
       </PanelSection>
     </SettingsDialog>
   );
+}
+
+function visionLabel(model: string, modes: Record<string, string>, auto: Record<string, string>): string {
+  if (!model) {
+    return "Pick a model to set image support";
+  }
+  const mode = modes[model] || "auto";
+  const detected = auto[model] || "unknown";
+  const found = detected === "yes" ? "sees images" : detected === "no" ? "text only" : "not sure yet";
+  if (mode === "yes") {
+    return "Image support: Yes";
+  }
+  if (mode === "no") {
+    return "Image support: No";
+  }
+  return `Image support: Auto (${found})`;
 }
 
 function secretDescription(kind: string, baseUrl: string, hasSecret: boolean, last4: string): string {

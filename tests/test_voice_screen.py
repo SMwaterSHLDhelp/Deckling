@@ -435,7 +435,7 @@ def test_text_only_model_offers_a_switch_without_capturing(tmp_path) -> None:
     assert "only reads text" in result["error"]
     assert result["suggestions"] == ["llava:latest"]
     assert grabbed == []
-    assert "POST" not in calls
+    assert calls.count("POST") >= 1
 
 
 def test_screen_look_sends_jpeg_vision_and_does_not_store_it(tmp_path) -> None:

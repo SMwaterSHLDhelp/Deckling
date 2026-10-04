@@ -80,6 +80,7 @@ export interface HearingSettings {
   thinking_tick: boolean;
   thinking_tick_set?: boolean;
   wake_error: string;
+  mic_source: string;
   stt_backend: string;
   install_message: string;
   install_progress: number;
@@ -102,6 +103,7 @@ export function defaultHearing(): HearingSettings {
     thinking_tick: true,
     thinking_tick_set: false,
     wake_error: "",
+    mic_source: "",
     stt_backend: "",
     install_message: "",
     install_progress: 0,
@@ -232,6 +234,7 @@ export type BackendEvent = {
   transcript?: string;
   action?: string;
   progress?: number;
+  score?: number;
 };
 
 export interface OkResult {

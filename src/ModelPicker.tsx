@@ -1,8 +1,7 @@
 import { PanelSectionRow, TextField } from "@decky/ui";
+import { useState } from "react";
 import { DeckRow } from "./DeckRow";
 import { fieldValue } from "./form";
-
-const VISIBLE_MODELS = 40;
 
 export function ModelPicker({
   label,
@@ -23,12 +22,14 @@ export function ModelPicker({
   error: string;
   visionIds?: string[];
 }) {
-  const shown = models.slice(0, VISIBLE_MODELS);
-  let status = "No models loaded yet. Type an id, or press Refresh models.";
+  const [custom, setCustom] = useState(false);
+  const inList = models.includes(value);
+  const showCustom = models.length === 0 || custom || (Boolean(value) && !inList);
+  let status = "Save the provider, then Refresh models.";
   if (loading) {
     status = "Loading models…";
   } else if (models.length > 0) {
-    status = "Pick a model below, or type an id.";
+    status = "Pick a model from the list.";
   }
   return (
     <>
@@ -40,22 +41,31 @@ export function ModelPicker({
           <div style={{ color: "#f2b8b5", whiteSpace: "pre-wrap" }}>{error}</div>
         </PanelSectionRow>
       ) : null}
-      {shown.map((id) => {
+      {models.map((id) => {
         const sees = visionIds?.includes(id) ? " · sees the screen" : "";
         return (
-          <DeckRow key={id} layout="below" onClick={() => onChange(id)}>
+          <DeckRow
+            key={id}
+            layout="below"
+            onClick={() => {
+              setCustom(false);
+              onChange(id);
+            }}
+          >
             {value === id ? `Selected: ${id}${sees}` : `${id}${sees}`}
           </DeckRow>
         );
       })}
-      {models.length > shown.length ? (
+      {models.length > 0 ? (
+        <DeckRow layout="below" onClick={() => setCustom(true)}>
+          Custom model id
+        </DeckRow>
+      ) : null}
+      {showCustom ? (
         <PanelSectionRow>
-          <div>{`${models.length - shown.length} more models are not listed. Type the id below.`}</div>
+          <TextField label={label} value={value} onChange={(event) => onChange(fieldValue(event))} />
         </PanelSectionRow>
       ) : null}
-      <PanelSectionRow>
-        <TextField label={label} value={value} onChange={(event) => onChange(fieldValue(event))} />
-      </PanelSectionRow>
       <DeckRow layout="below" onClick={onRefresh}>
         {loading ? "Refreshing models…" : "Refresh models"}
       </DeckRow>

@@ -14,7 +14,6 @@ from . import claude_code, vision
 from .http_util import HttpError, iter_lines, join_url, request_json
 from .redact import redact
 from .sse import iter_json_lines, iter_sse_json
-from .vision import row_sees_images
 
 ANTHROPIC_VERSION = "2023-06-01"
 _CONTEXT_MESSAGES = 40
@@ -43,9 +42,10 @@ def prepare_messages(provider: dict[str, Any], history: list[dict[str, str]], sy
 
 
 class ModelReport:
-    def __init__(self, ids: list[str], vision: list[str]) -> None:
+    def __init__(self, ids: list[str], vision: list[str], auto: dict[str, str] | None = None) -> None:
         self.ids = ids
         self.vision = vision
+        self.auto = auto or {item: ("yes" if item in vision else "unknown") for item in ids}
 
 
 def describe_models(provider: dict[str, Any]) -> ModelReport:
@@ -56,13 +56,15 @@ def describe_models(provider: dict[str, Any]) -> ModelReport:
         report = _describe_ollama_models(provider)
     elif kind == "anthropic":
         ids = _list_anthropic_models(provider)
-        report = ModelReport(ids, [item for item in ids if vision.model_sees_images(item)])
+        seen = [item for item in ids if vision.model_sees_images(item)]
+        report = ModelReport(ids, seen, _named_auto(ids, seen))
     elif kind == "gemini":
         ids = _list_gemini_models(provider)
-        report = ModelReport(ids, [item for item in ids if vision.model_sees_images(item)])
+        seen = [item for item in ids if vision.model_sees_images(item)]
+        report = ModelReport(ids, seen, _named_auto(ids, seen))
     elif kind == "claude_code":
         ids = claude_code.list_models(provider)
-        report = ModelReport(ids, [])
+        report = ModelReport(ids, [], _named_auto(ids, []))
     else:
         raise ValueError(f"Unknown provider type: {kind}")
     if kind == "hermes":
@@ -80,6 +82,55 @@ def describe_models(provider: dict[str, Any]) -> ModelReport:
 
 def list_models(provider: dict[str, Any]) -> list[str]:
     return describe_models(provider).ids
+
+
+def _named_auto(ids: list[str], seen: list[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    vision_ids = set(seen)
+    for item in ids:
+        if item in vision_ids:
+            found[item] = "yes"
+        elif vision.vision_status({"id": item}, None) is False:
+            found[item] = "no"
+        else:
+            found[item] = "unknown"
+    return found
+
+
+def probe_sees_images(provider: dict[str, Any], model: str) -> bool | None:
+    """Send a 1x1 image once. True if the server accepts it, False if it refuses, None if unsure."""
+    from .imageutil import encode_jpeg
+
+    jpeg = encode_jpeg(b"\xff\x00\x00", 1, 1)
+    cancel = threading.Event()
+    timer = threading.Timer(12, cancel.set)
+    timer.daemon = True
+    timer.start()
+    try:
+        saw = False
+        for _delta in iter_text(
+            provider,
+            [{"role": "user", "content": "Reply with one word."}],
+            model,
+            cancel,
+            image=jpeg,
+        ):
+            saw = True
+            cancel.set()
+            break
+        if cancel.is_set() and not saw:
+            return None
+        return True
+    except (HttpError, ValueError, OSError) as exc:
+        text = str(exc).lower()
+        if any(word in text for word in ("image", "vision", "multimodal", "unsupported", "modalit")):
+            return False
+        status = int(getattr(exc, "status", 0) or 0)
+        if status in {400, 404, 415, 422}:
+            return False
+        return None
+    finally:
+        timer.cancel()
 
 
 def iter_text(
@@ -255,6 +306,26 @@ def _row_name(row: dict[str, Any]) -> str:
     return name.strip() if isinstance(name, str) else ""
 
 
+def _as_rows(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return rows
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            rows.append({"id": item.strip()})
+        elif isinstance(item, dict) and _row_name(item):
+            rows.append(item)
+    return rows
+
+
+def _auto_map(rows: dict[str, dict[str, Any]], props_vision: bool | None) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for name, row in rows.items():
+        status = vision.vision_status(row, props_vision)
+        found[name] = "yes" if status is True else "no" if status is False else "unknown"
+    return found
+
+
 def _merge_row(current: dict[str, Any], row: dict[str, Any]) -> None:
     caps = [str(item) for item in current.get("capabilities") or [] if isinstance(current.get("capabilities"), list)]
     extra = row.get("capabilities")
@@ -267,11 +338,13 @@ def _merge_row(current: dict[str, Any], row: dict[str, Any]) -> None:
         current["capabilities"] = caps
 
 
-def _models_from_openai_payload(payload: Any, props_vision: bool | None = None) -> tuple[list[str], list[str]]:
+def _models_from_openai_payload(
+    payload: Any, props_vision: bool | None = None
+) -> tuple[list[str], list[str], dict[str, str]]:
     if not isinstance(payload, dict):
-        return [], []
-    data_rows = [row for row in payload.get("data") or [] if isinstance(row, dict) and _row_name(row)]
-    model_rows = [row for row in payload.get("models") or [] if isinstance(row, dict) and _row_name(row)]
+        return [], [], {}
+    data_rows = _as_rows(payload.get("data"))
+    model_rows = _as_rows(payload.get("models"))
     chosen = data_rows or model_rows
     by_name: dict[str, dict[str, Any]] = {}
     for row in chosen:
@@ -284,12 +357,13 @@ def _models_from_openai_payload(payload: Any, props_vision: bool | None = None) 
             if name in by_name:
                 _merge_row(by_name[name], row)
     ids = sorted(by_name)
-    seen = [name for name, row in by_name.items() if row_sees_images(row, props_vision)]
-    return ids, sorted(set(seen))
+    auto = _auto_map(by_name, props_vision)
+    seen = sorted(name for name, status in auto.items() if status == "yes")
+    return ids, seen, auto
 
 
 def _ids_from_openai_payload(payload: Any) -> list[str]:
-    ids, _vision = _models_from_openai_payload(payload, None)
+    ids, _vision, _auto = _models_from_openai_payload(payload, None)
     return ids
 
 
@@ -313,7 +387,7 @@ def _llamacpp_props_vision(provider: dict[str, Any]) -> bool | None:
     return None
 
 
-def _openai_rows(provider: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _openai_rows(provider: dict[str, Any]) -> tuple[list[str], list[str], dict[str, str]]:
     payload = request_json(
         "GET",
         join_url(_openai_root(provider), "models"),
@@ -321,38 +395,71 @@ def _openai_rows(provider: dict[str, Any]) -> tuple[list[str], list[str]]:
         timeout=20,
     )
     props = _llamacpp_props_vision(provider)
-    return _models_from_openai_payload(payload, props)
+    ids, seen, auto = _models_from_openai_payload(payload, props)
+    return ids, seen, auto
 
 
 def _describe_openai_models(provider: dict[str, Any]) -> ModelReport:
     if provider.get("kind") in {"openai", "hermes", "xai"}:
         require_credentials(provider)
     try:
-        ids, seen = _openai_rows(provider)
+        ids, seen, auto = _openai_rows(provider)
     except (HttpError, OSError) as exc:
         if provider.get("kind") == "llamacpp":
             raise _explain_llamacpp(exc, provider) from exc
         raise
-    return ModelReport(ids, seen)
+    return ModelReport(ids, seen, auto)
+
+
+def _ollama_show_status(provider: dict[str, Any], name: str) -> bool | None:
+    """Ollama /api/show capabilities. None when the server does not say."""
+    try:
+        payload = request_json(
+            "POST",
+            join_url(_base(provider), "api/show"),
+            headers=_auth_headers(provider),
+            payload={"model": name},
+            timeout=8,
+        )
+    except (HttpError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if vision.capabilities_see_images(payload.get("capabilities")):
+        return True
+    capabilities = payload.get("capabilities")
+    if isinstance(capabilities, list) and capabilities:
+        return False
+    return None
 
 
 def _describe_ollama_models(provider: dict[str, Any]) -> ModelReport:
     headers = _auth_headers(provider)
     payload = request_json("GET", join_url(_base(provider), "api/tags"), headers=headers, timeout=15)
     rows = payload.get("models") if isinstance(payload, dict) else None
-    ids: list[str] = []
-    seen: list[str] = []
+    by_name: dict[str, dict[str, Any]] = {}
     if isinstance(rows, list):
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = row.get("name") or row.get("model")
-            if not isinstance(name, str) or not name:
-                continue
-            ids.append(name)
-            if row_sees_images(row, None) or vision.model_sees_images(name):
-                seen.append(name)
-    return ModelReport(sorted(set(ids)), sorted(set(seen)))
+            if isinstance(row, str) and row.strip():
+                by_name[row.strip()] = {"name": row.strip()}
+            elif isinstance(row, dict):
+                name = row.get("name") or row.get("model")
+                if isinstance(name, str) and name:
+                    by_name[name] = row
+    auto = _auto_map(by_name, None)
+    checked = 0
+    for name, status in list(auto.items()):
+        if status != "unknown" or checked >= 6:
+            continue
+        checked += 1
+        shown = _ollama_show_status(provider, name)
+        if shown is True:
+            auto[name] = "yes"
+        elif shown is False:
+            auto[name] = "no"
+    ids = sorted(by_name)
+    seen = sorted(name for name, status in auto.items() if status == "yes")
+    return ModelReport(ids, seen, auto)
 
 
 def _xai_http_message(exc: HttpError) -> str:

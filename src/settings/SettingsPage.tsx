@@ -8,6 +8,7 @@ import {
   getState,
   saveChats,
   saveContext,
+  listModels,
   saveSettings,
   saveVoice,
   saveWeb,
@@ -25,6 +26,7 @@ import { errorMessage, sleep, withRetry } from "../retry";
 import { copyText } from "../steam";
 import type { AppState, ContextSettings, OkResult, PublicProvider, WebSettings } from "../types";
 import { defaultChats, defaultContext, defaultHearing, defaultVoice, defaultWeb } from "../types";
+import { ModelPicker } from "../ModelPicker";
 import { SettingsDialog } from "./dialog";
 import { ProviderEditor, blankDraft, draftFromProvider, type Draft } from "./ProviderEditor";
 import { HearingSection } from "./HearingSection";
@@ -793,6 +795,37 @@ function DefaultsSection({
   const [providerId, setProviderId] = useState(defaultProviderId);
   const [model, setModel] = useState(defaultModel);
   const [prompt, setPrompt] = useState(systemPrompt);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+  const [modelReload, setModelReload] = useState(0);
+  const [visionIds, setVisionIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!providerId) {
+      setModels([]);
+      return;
+    }
+    let cancelled = false;
+    setModelsLoading(true);
+    setModelsError("");
+    void listModels(providerId).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setModelsLoading(false);
+      if (!result.ok) {
+        setModelsError(result.error || "Could not list models");
+        setModels([]);
+        return;
+      }
+      setModels(result.models || []);
+      setVisionIds(result.vision_models || []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [providerId, modelReload]);
 
   const save = async () => {
     let result;
@@ -846,9 +879,16 @@ function DefaultsSection({
             </DeckRow>
           ))
         )}
-        <PanelSectionRow>
-          <TextField key="default-model" label="Default model" value={model} onChange={(event) => setModel(fieldValue(event))} />
-        </PanelSectionRow>
+        <ModelPicker
+          label="Default model"
+          models={models}
+          value={model}
+          onChange={setModel}
+          onRefresh={() => setModelReload((value) => value + 1)}
+          loading={modelsLoading}
+          error={modelsError}
+          visionIds={visionIds}
+        />
         <PanelSectionRow>
           <TextField key="system-prompt" label="System prompt" value={prompt} onChange={(event) => setPrompt(fieldValue(event))} />
         </PanelSectionRow>
