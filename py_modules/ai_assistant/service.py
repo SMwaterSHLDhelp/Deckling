@@ -146,6 +146,27 @@ def _about_game(name: str) -> str:
     return cleaned[:_GAME_NAME_LIMIT]
 
 
+def _strip_playing(text: str) -> str:
+    if text.startswith("[Playing:") and "\n\n" in text:
+        return text.split("\n\n", 1)[1]
+    return text
+
+
+def outgoing_history(history: list[dict[str, str]], game_name: str) -> list[dict[str, str]]:
+    """Drop a game name that was true on an earlier turn. The latest question names the focused game."""
+    copied = [{"role": str(item.get("role") or ""), "content": str(item.get("content") or "")} for item in history]
+    game = _about_game(game_name)
+    last_user: int | None = None
+    for index, item in enumerate(copied):
+        if item["role"] != "user":
+            continue
+        item["content"] = _strip_playing(item["content"])
+        last_user = index
+    if last_user is not None and game and copied[last_user]["content"]:
+        copied[last_user]["content"] = f"[Playing: {game}]\n\n{copied[last_user]['content']}"
+    return copied
+
+
 def _as_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -181,6 +202,7 @@ class AssistantService:
         self._last_jpeg: bytes | None = None
         self._capture_lock = threading.Lock()
         self._game: dict[str, Any] = {}
+        self._game_known = False
 
     def state(self) -> dict[str, Any]:
         # The catalog is static data. A broken settings or chat file must not hide it.
@@ -360,7 +382,7 @@ class AssistantService:
             return _fail("A response is still streaming")
         self.voice.stop()
         text = str(content or "").strip()
-        game = _about_game(about_game)
+        game = self._name_for_request(about_game)
         if game and text:
             text = f"[Playing: {game}]\n\n{text}"
         elif game and not text:
@@ -399,6 +421,24 @@ class AssistantService:
         cancel.set()
         return {"ok": True}
 
+    def _name_for_request(self, hinted: str) -> str:
+        """A request that arrives while the game is changing uses the focused app, not the previous name."""
+        if self._game_known:
+            return _about_game(str(self._game.get("name") or ""))
+        return _about_game(hinted)
+
+    def _restamp_playing(self, session_id: str, history: list[dict[str, str]]) -> None:
+        latest = ""
+        for item in history:
+            if item.get("role") == "user":
+                latest = item.get("content") or ""
+        if not latest.startswith("[Playing:"):
+            return
+        try:
+            self.store.stamp_latest_user(session_id, latest)
+        except (OSError, ValueError):
+            return
+
     def _with_game_context(self, prompt: str, config: dict[str, Any]) -> str:
         block = format_block(self._game, normalize_context(config.get("context")))
         if not block:
@@ -423,22 +463,28 @@ class AssistantService:
                 pass
         else:
             game = {}
+        previous_name = _about_game(str(self._game.get("name") or ""))
         previous_key, _previous_label = game_bucket(self._game if self._game.get("name") else None)
         self._game = game
+        self._game_known = True
         context = normalize_context(self.store.load_config().get("context"))
         key, label = game_bucket(self._game if self._game.get("name") else None)
+        new_name = _about_game(str(game.get("name") or ""))
         payload: dict[str, Any] = {
             "ok": True,
             "context": context,
             "game": public_game(self._game),
             "suggestions": self._suggestions(),
             "focused": False,
+            "notice": "",
             **self._session_bits(),
         }
-        if key != previous_key and not self._streams:
+        if key != previous_key:
             focused = self.store.focus_game(key, label)
             payload["focused"] = True
             payload.update(self._open_session(focused["session"]))
+            if new_name and previous_name and new_name != previous_name:
+                payload["notice"] = f"Switched to {new_name}"
         return payload
 
     def _suggestions(self) -> list[str]:
@@ -1017,7 +1063,12 @@ class AssistantService:
                 current = next(item for item in _data["sessions"] if item.get("id") == session_id)
             if history_override is not None:
                 history = history_override
-                prompt = self._with_voice(system_override or "")
+                if self._game_known:
+                    prompt = self._with_voice(
+                        self._with_game_context(jarvis_prompt(self._name_for_request("")), config)
+                    )
+                else:
+                    prompt = self._with_voice(system_override or "")
             else:
                 history = [
                     {"role": item["role"], "content": item["content"]}
@@ -1025,6 +1076,9 @@ class AssistantService:
                     if item.get("role") in {"user", "assistant"}
                 ]
                 prompt = self._with_voice(self._with_game_context(str(config.get("system_prompt") or ""), config))
+            if self._game_known:
+                history = outgoing_history(history, self._name_for_request(""))
+                self._restamp_playing(session_id, history)
             messages = providers.prepare_messages(provider, history, prompt)
             meta["session_id"] = str(current.get("claude_session_id") or "")
             self.host.info("Chat started kind=%s model=%s screen=%s", provider.get("kind"), chosen, bool(image))

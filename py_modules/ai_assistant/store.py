@@ -629,6 +629,24 @@ class Store:
             self.save_sessions(data)
             return message
 
+    def stamp_latest_user(self, session_id: str, content: str) -> None:
+        """Replace the game name on the question that is about to be sent."""
+        text = content[:_MAX_CONTENT]
+        with self._lock:
+            data = self.load_sessions()
+            match = next((item for item in data["sessions"] if item.get("id") == session_id), None)
+            if match is None:
+                return
+            messages = list(match.get("messages") or [])
+            if not messages or messages[-1].get("role") != "user":
+                return
+            if not str(messages[-1].get("content") or "").startswith("[Playing:"):
+                return
+            messages[-1]["content"] = text
+            match["messages"] = messages
+            match["preview"] = preview_text(messages)
+            self.save_sessions(data)
+
     def set_api_key(self, provider_id: str, api_key: str) -> None:
         with self._lock:
             config = self.load_config()

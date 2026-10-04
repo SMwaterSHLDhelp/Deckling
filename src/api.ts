@@ -134,7 +134,7 @@ export const cancelChat = deckyCall<[requestId: string], OkResult>("cancel_chat"
 export const saveVoice = deckyCall<[settings: Partial<VoiceSettings>], OkResult & { voice?: VoiceSettings }>("save_voice");
 export const setGameContext = deckyCall<
   [snapshot: Record<string, unknown>],
-  SessionResult & { game?: NowPlaying | null; suggestions?: string[]; context?: ContextSettings }
+  SessionResult & { game?: NowPlaying | null; suggestions?: string[]; context?: ContextSettings; notice?: string }
 >("set_game_context");
 export const saveContext = deckyCall<
   [settings: Partial<ContextSettings>],

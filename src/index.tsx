@@ -2,6 +2,7 @@ import { addEventListener, definePlugin, removeEventListener, routerHook, toaste
 import { staticClasses } from "@decky/ui";
 import { FaRobot } from "react-icons/fa";
 import { ChatPanel } from "./chat/ChatPanel";
+import { startGameWatch } from "./gameWatch";
 import { SettingsRoute } from "./settings/SettingsRoute";
 import type { BackendEvent } from "./types";
 
@@ -11,6 +12,7 @@ export default definePlugin(() => {
   if (typeof window !== "undefined") {
     (window as unknown as { __decklingQAM?: typeof content }).__decklingQAM = content;
   }
+  const stopWatch = startGameWatch();
   const onEvent = addEventListener<[BackendEvent]>("deckling_event", (event) => {
     if (event.type === "toast" && event.message) {
       toaster.toast({ title: "Deckling", body: event.message, duration: 3000 });
@@ -26,6 +28,7 @@ export default definePlugin(() => {
     content,
     icon: <FaRobot />,
     onDismount() {
+      stopWatch();
       removeEventListener("deckling_event", onEvent);
       routerHook.removeRoute("/deckling/settings");
     },

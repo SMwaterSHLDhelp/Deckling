@@ -16,7 +16,6 @@ import {
   lookAtScreen,
   pushToTalk,
   sendMessage,
-  setGameContext,
   setHearingActivity,
   stopListening,
   stopSpeaking,
@@ -29,12 +28,19 @@ import { bindHearingChord, bindSleep } from "../hearing";
 import { ModelPicker } from "../ModelPicker";
 import { errorMessage, sleep, withRetry } from "../retry";
 import { bindScreenChord, prepareScreenCapture, trySteamScreenshot, wantsScreenLook } from "../screenHelp";
+import { GAME_EVENT, syncFocusedGame } from "../gameWatch";
 import { newRequestId, runningGameName } from "../steam";
-import type { AppState, BackendEvent, ChatMessage } from "../types";
+import type { AppState, BackendEvent, ChatMessage, ContextSettings, NowPlaying } from "../types";
 import { defaultChats, defaultContext, defaultHearing, defaultVoice, defaultWeb } from "../types";
 import type { SessionResult } from "./ChatList";
-import type { NowPlaying } from "../types";
-import { readLiveGame } from "../gameContext";
+
+type GameSyncDetail = SessionResult & {
+  game?: NowPlaying | null;
+  suggestions?: string[];
+  context?: ContextSettings;
+  notice?: string;
+  focused?: boolean;
+};
 
 function thinkingBubble(id: string, status: string): ChatMessage {
   return { id, role: "assistant", content: "", created_at: Date.now() / 1000, status };
@@ -73,6 +79,7 @@ export function ChatPanel() {
   const [visionModels, setVisionModels] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [speaking, setSpeaking] = useState(false);
+  const [switchNote, setSwitchNote] = useState("");
   const speakingRef = useRef(false);
   speakingRef.current = speaking;
   const requestRef = useRef<string | null>(null);
@@ -308,80 +315,38 @@ export function ChatPanel() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    let lastKey = "";
-    const tick = async () => {
-      const snapshot = await readLiveGame();
-      if (cancelled) {
+    const onGame = (event: Event) => {
+      const detail = (event as CustomEvent<GameSyncDetail>).detail;
+      if (!detail?.ok) {
         return;
       }
-      const key = [
-        snapshot.appid,
-        snapshot.name,
-        snapshot.exe,
-        snapshot.launch_options,
-        snapshot.rich_presence,
-        snapshot.achievements_unlocked,
-      ].join("|");
-      if (key === lastKey) {
-        return;
+      if (detail.notice) {
+        setSwitchNote(detail.notice);
       }
-      lastKey = key;
-      if (!snapshot.name) {
-        setState((prev) => ({ ...prev, game: null, suggestions: [] }));
-        try {
-          const result = await setGameContext({ ...snapshot });
-          if (!cancelled && result.focused && result.current_session_id && !requestRef.current) {
-            applyOpened(result);
-          }
-        } catch {
-          // The card is already clear. The next poll retries the backend.
-        }
-        return;
-      }
-      const local: NowPlaying = {
-        appid: snapshot.appid,
-        name: snapshot.name,
-        rich_presence: snapshot.rich_presence,
-        achievements_unlocked: snapshot.achievements_unlocked,
-        achievements_total: snapshot.achievements_total,
-        capsule: "",
-        emulator: "",
-        shortcut: snapshot.shortcut,
-        sources: snapshot.sources,
-      };
-      try {
-        const result = await setGameContext({ ...snapshot });
-        if (cancelled) {
-          return;
-        }
-        if (result.ok) {
-          setState((prev) => ({
-            ...prev,
-            game: result.game === undefined ? local : result.game,
-            suggestions: result.suggestions || [],
-            context: result.context ? { ...defaultContext(), ...result.context } : prev.context,
-            sessions: result.sessions || prev.sessions,
-          }));
-          if (result.focused && result.current_session_id && !requestRef.current) {
-            applyOpened(result);
-          }
-          return;
-        }
-      } catch {
-        // Store lookup can fail offline. The Steam fields still fill the card.
-      }
-      if (!cancelled) {
-        setState((prev) => ({ ...prev, game: local }));
+      const local = detail.game;
+      setState((prev) => ({
+        ...prev,
+        game: local === undefined ? prev.game : local,
+        suggestions: detail.suggestions || [],
+        context: detail.context ? { ...defaultContext(), ...detail.context } : prev.context,
+        sessions: detail.sessions || prev.sessions,
+      }));
+      if (detail.focused && detail.current_session_id && detail.messages) {
+        applyOpened(detail);
       }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+    window.addEventListener(GAME_EVENT, onGame);
+    void syncFocusedGame(true);
+    return () => window.removeEventListener(GAME_EVENT, onGame);
   }, []);
+
+  useEffect(() => {
+    if (!switchNote) {
+      return;
+    }
+    const timer = window.setTimeout(() => setSwitchNote(""), 6000);
+    return () => window.clearTimeout(timer);
+  }, [switchNote]);
 
   useEffect(() => {
     if (!providerId) {
@@ -460,8 +425,9 @@ export function ChatPanel() {
     }));
     try {
       await stopSpeaking();
+      const snapshot = await syncFocusedGame(true);
       const shot = await prepareScreenCapture(() => Navigation.CloseSideMenus(), sleep, trySteamScreenshot);
-      const result = await lookAtScreen(providerId, modelId, question, requestId, runningGameName(), shot || "", true);
+      const result = await lookAtScreen(providerId, modelId, question, requestId, snapshot.name, shot || "", true);
       if (!result.ok) {
         requestRef.current = null;
         setStreaming(false);
@@ -487,7 +453,7 @@ export function ChatPanel() {
   };
   lookRef.current = (question?: string) => look(question ?? draft);
 
-  const send = async (aboutGame: string, text = draft) => {
+  const send = async (text = draft) => {
     if (streaming) {
       return;
     }
@@ -506,7 +472,8 @@ export function ChatPanel() {
     setError("");
     let result;
     try {
-      result = await sendMessage(providerId, model, text, requestId, aboutGame);
+      const snapshot = await syncFocusedGame(true);
+      result = await sendMessage(providerId, model, text, requestId, snapshot.name);
     } catch (err) {
       requestRef.current = null;
       setStreaming(false);
@@ -613,7 +580,7 @@ export function ChatPanel() {
     handle.close = () => opened.Close();
   };
 
-  const applyOpened = (result: SessionResult) => {
+  function applyOpened(result: SessionResult) {
     if (!result.ok || !result.messages || !result.current_session_id) {
       setError(result.error || "Could not open that conversation");
       return;
@@ -632,7 +599,7 @@ export function ChatPanel() {
         setModel(result.model);
       }
     }
-  };
+  }
 
   return (
     <>
@@ -674,6 +641,37 @@ export function ChatPanel() {
           </ButtonItem>
         ) : null}
       </PanelSection>
+
+      {state.game?.name ? (
+        <PanelSection title="Now playing">
+          <PanelSectionRow>
+            <div style={{ fontSize: "16px" }}>
+              {state.game.capsule ? (
+                <img
+                  src={state.game.capsule}
+                  alt=""
+                  style={{ width: "100%", borderRadius: "6px", marginBottom: "8px" }}
+                />
+              ) : null}
+              <div>{state.game.name}</div>
+              {state.game.rich_presence ? (
+                <div style={{ opacity: 0.8, marginTop: "4px" }}>{state.game.rich_presence}</div>
+              ) : null}
+              {state.game.achievements_total ? (
+                <div style={{ opacity: 0.8, marginTop: "4px" }}>
+                  {`Achievements ${state.game.achievements_unlocked ?? 0}/${state.game.achievements_total}`}
+                </div>
+              ) : null}
+              {switchNote ? <div style={{ marginTop: "6px" }}>{switchNote}</div> : null}
+            </div>
+          </PanelSectionRow>
+          {state.suggestions.map((prompt) => (
+            <ButtonItem key={prompt} layout="below" onClick={() => void send(prompt)}>
+              {prompt}
+            </ButtonItem>
+          ))}
+        </PanelSection>
+      ) : null}
 
       <PanelSection title="Chat">
         {speaking ? (
@@ -727,7 +725,7 @@ export function ChatPanel() {
           />
         </PanelSectionRow>
         {streaming ? null : (
-          <ButtonItem layout="below" disabled={!providerId} onClick={() => void send("")}>
+          <ButtonItem layout="below" disabled={!providerId} onClick={() => void send()}>
             Send
           </ButtonItem>
         )}

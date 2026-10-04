@@ -6,6 +6,12 @@ Move items from **Unreleased** into a version section before tagging. The releas
 
 ## [Unreleased]
 
+## [0.1.0-rc.19] - 2026-10-04
+
+### Fixed
+
+- Switching games switches Deckling. The running game was read from `Router.MainRunningApp` on a timer, and that value stayed on the game that was focused when the plugin loaded. After Sephiria, launching Graveyard Keeper still opened the Sephiria chat and the prompt still said Sephiria. Deckling subscribes to `SteamClient.GameSessions.RegisterForAppLifetimeNotifications`, and reads the focused app again when the Quick Access menu opens and on every send. Now playing updates immediately, that game's latest chat opens (or a new one), and a notice says "Switched to Graveyard Keeper". Every request, including a voice line that arrives during the switch, is sent with the game that is focused then. When more than one app is running, the one that just started is used. Older "[Playing: …]" lines in that request are replaced so the model is not still told the previous game.
+
 ## [0.1.0-rc.18] - 2026-10-04
 
 ### Fixed

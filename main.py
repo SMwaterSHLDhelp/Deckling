@@ -3,7 +3,7 @@ import sys
 # Single event name the Quick Access panel and the settings page both listen for.
 EVENT = "deckling_event"
 LEGACY_NAME = "AI Assistant"
-VERSION = "0.1.0-rc.18"
+VERSION = "0.1.0-rc.19"
 _BOOT_ERROR = ""
 _BOOT_TRACE = ""
 

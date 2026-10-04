@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 
 from ai_assistant.game_context import enrich_store, format_block, prepare_snapshot, rom_title, suggestions
-from ai_assistant.service import AssistantService
+from ai_assistant.service import AssistantService, outgoing_history
 
 
 def test_rom_title_comes_from_the_emulator_command() -> None:
@@ -133,3 +135,58 @@ def test_service_adds_the_block_for_the_running_game(tmp_path) -> None:
     assert "600 AD" in block
     service.save_context({"share_game_context": False})
     assert service._with_game_context("Be brief.", service.store.load_config()) == "Be brief."
+
+
+def test_switching_games_opens_that_chat_and_sends_the_current_one(tmp_path) -> None:
+    service = AssistantService(str(tmp_path / "settings"), str(tmp_path / "runtime"))
+    sephiria = service.set_game_context({"appid": 11, "name": "Sephiria", "sources": ["router"]})
+    assert sephiria["focused"] is True
+    assert sephiria["notice"] == ""
+    seph_id = sephiria["current_session_id"]
+    service.store.append_message(seph_id, "user", "[Playing: Sephiria]\n\nWhere is the door?")
+    keeper = service.set_game_context({"appid": 22, "name": "Graveyard Keeper", "sources": ["router"]})
+    assert keeper["notice"] == "Switched to Graveyard Keeper"
+    assert keeper["focused"] is True
+    assert keeper["current_session_id"] != seph_id
+    assert keeper["game"]["name"] == "Graveyard Keeper"
+    keeper_id = keeper["current_session_id"]
+    block = service._with_game_context("Be brief.", service.store.load_config())
+    assert "Graveyard Keeper" in block
+    assert "Sephiria" not in block
+    rewritten = outgoing_history(
+        [
+            {"role": "user", "content": "[Playing: Sephiria]\n\nWhere is the door?"},
+            {"role": "assistant", "content": "In the chapel."},
+            {"role": "user", "content": "[Playing: Sephiria]\n\nWhat now?"},
+        ],
+        "Graveyard Keeper",
+    )
+    assert "Sephiria" not in rewritten[0]["content"]
+    assert rewritten[2]["content"].startswith("[Playing: Graveyard Keeper]")
+    back = service.set_game_context({"appid": 11, "name": "Sephiria", "sources": ["router"]})
+    assert back["notice"] == "Switched to Sephiria"
+    assert back["current_session_id"] == seph_id
+    service._streams["stuck"] = threading.Event()
+    again = service.set_game_context({"appid": 22, "name": "Graveyard Keeper", "sources": ["router"]})
+    assert again["focused"] is True
+    assert again["current_session_id"] == keeper_id
+    assert again["notice"] == "Switched to Graveyard Keeper"
+
+    async def run() -> None:
+        saved = service.save_provider(
+            {"kind": "custom", "name": "Local", "base_url": "http://127.0.0.1:9/v1", "default_model": "m"}
+        )
+        service._streams.clear()
+        result = service.start_chat(
+            saved["provider"]["id"],
+            "m",
+            "What should I do?",
+            "req-switch",
+            "Sephiria",
+        )
+        assert result["ok"] is True
+        assert result["messages"][-1]["content"].startswith("[Playing: Graveyard Keeper]")
+        assert "Sephiria" not in result["messages"][-1]["content"]
+        await service.shutdown()
+
+    asyncio.run(run())

@@ -40,6 +40,7 @@ jobs:
           pnpm run typecheck
           pnpm run lint
           node --experimental-strip-types scripts/game-context.test.ts
+          node --experimental-strip-types scripts/game-watch.test.ts
           node --experimental-strip-types scripts/page-shell.test.ts
 
       - name: Lint and test the backend

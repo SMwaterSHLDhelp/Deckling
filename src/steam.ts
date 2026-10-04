@@ -1,7 +1,12 @@
 import { toaster } from "@decky/api";
 import { Router } from "@decky/ui";
+import { peekFocusedName } from "./gameContext";
 
 export function runningGameName(): string {
+  const watched = peekFocusedName();
+  if (watched.known) {
+    return watched.name;
+  }
   try {
     const name = Router.MainRunningApp?.display_name?.trim() ?? "";
     return name;
