@@ -25,7 +25,14 @@ from .oauth import OAuthError
 from .redact import redact
 from .screen import CaptureError, capture_screen, decode_supplied_image
 from .store import Store, normalize_voice, public_provider, public_session_summary
-from .vision import DEFAULT_QUESTION, jarvis_prompt, model_can_see, model_sees_images, vision_ids
+from .vision import (
+    DEFAULT_QUESTION,
+    EARLIER_SCREENSHOT,
+    jarvis_prompt,
+    model_can_see,
+    model_sees_images,
+    vision_ids,
+)
 from .voice import SPOKEN_STYLE, VoiceEngine
 from .web import WebClient, normalize_web, public_web
 from .web_chat import TOOL_KINDS, ScreenCapture, ToolsUnsupported, iter_with_tools
@@ -172,6 +179,7 @@ class AssistantService:
             self.hearing.start()
         self.screen_grabbers = None
         self._last_jpeg: bytes | None = None
+        self._capture_lock = threading.Lock()
         self._game: dict[str, Any] = {}
 
     def state(self) -> dict[str, Any]:
@@ -376,6 +384,12 @@ class AssistantService:
             "messages": list(current.get("messages") or []),
             "sessions": [public_session_summary(item) for item in refreshed["sessions"]],
         }
+
+    def _cancel_active_streams(self) -> None:
+        """A stuck screenshot or vision call must not block the next look."""
+        for request_id, cancel in list(self._streams.items()):
+            cancel.set()
+            self._streams.pop(request_id, None)
 
     def cancel_chat(self, request_id: str) -> dict[str, Any]:
         self.voice.stop()
@@ -612,10 +626,9 @@ class AssistantService:
         qam_hidden: bool,
     ) -> dict[str, Any]:
         self.voice.stop()
+        self._cancel_active_streams()
         if not request_id or len(str(request_id)) > 80:
             raise ValueError("Missing request id")
-        if self._streams:
-            return _fail("A response is still streaming")
         enabled = bool(normalize_voice(self.store.load_config().get("voice"))["screen_capture"])
         hidden = _as_bool(qam_hidden)
         if not enabled:
@@ -685,12 +698,7 @@ class AssistantService:
             return json.dumps({"error": "Screen capture is turned off in settings."}), None
         announce("Taking photo")
         try:
-            raw = capture_screen(
-                qam_hidden=True,
-                enabled=True,
-                runtime_dir=self.store.runtime_dir,
-                grabbers=self.screen_grabbers,
-            )
+            raw = self._locked_capture()
             jpeg = to_jpeg(raw)
         except Exception as exc:  # noqa: BLE001 - the model hears the capture error
             return json.dumps({"error": str(exc)[:400]}), None
@@ -891,7 +899,7 @@ class AssistantService:
             self.store.append_message(session_id, "user", f"[Looking at the screen] {question}")
         except Exception as exc:  # noqa: BLE001 - shown in the panel, never logged raw
             self._streams.pop(request_id, None)
-            self.host.warning("Screen capture failed")
+            self.host.warning("Screen capture failed: %s", redact(str(exc)))
             await self._emit(
                 {"type": "chat_error", "request_id": request_id, "session_id": session_id, "error": redact(str(exc))}
             )
@@ -904,8 +912,34 @@ class AssistantService:
             cancel,
             image=jpeg,
             system_override=self._with_game_context(jarvis_prompt(game), self.store.load_config()),
-            history_override=[{"role": "user", "content": question}],
+            history_override=self._history_for_screen(session_id, question),
         )
+
+    def _history_for_screen(self, session_id: str, question: str) -> list[dict[str, str]]:
+        """Earlier looks stay as text. Only the new question is sent with a picture."""
+        try:
+            data = self.store.load_sessions()
+        except (OSError, ValueError):
+            data = {"sessions": []}
+        current = next((item for item in data.get("sessions") or [] if item.get("id") == session_id), None)
+        history: list[dict[str, str]] = []
+        for item in (current or {}).get("messages") or []:
+            if item.get("role") not in {"user", "assistant"}:
+                continue
+            history.append({"role": str(item.get("role")), "content": str(item.get("content") or "")})
+        screen_turns = [
+            index
+            for index, item in enumerate(history)
+            if item["role"] == "user" and "[Looking at the screen]" in item["content"]
+        ]
+        for index in screen_turns[:-1]:
+            if EARLIER_SCREENSHOT not in history[index]["content"]:
+                history[index]["content"] = f"{history[index]['content']} {EARLIER_SCREENSHOT}"
+        if history and history[-1]["role"] == "user":
+            history[-1]["content"] = question
+        else:
+            history.append({"role": "user", "content": question})
+        return history
 
     def _thinking_tick(self) -> bool:
         try:
@@ -919,6 +953,19 @@ class AssistantService:
         while not stop.wait(3.0):
             play_pcm(tick_pcm())
 
+    def _locked_capture(self) -> bytes:
+        if not self._capture_lock.acquire(timeout=12):
+            raise CaptureError("A screenshot is still in progress. Try again in a moment.")
+        try:
+            return capture_screen(
+                qam_hidden=True,
+                enabled=True,
+                runtime_dir=self.store.runtime_dir,
+                grabbers=self.screen_grabbers,
+            )
+        finally:
+            self._capture_lock.release()
+
     def _obtain_screen(self, image_b64: str) -> bytes:
         errors: list[str] = []
         if str(image_b64 or "").strip():
@@ -927,12 +974,7 @@ class AssistantService:
             except CaptureError as exc:
                 errors.append(str(exc))
         try:
-            return capture_screen(
-                qam_hidden=True,
-                enabled=True,
-                runtime_dir=self.store.runtime_dir,
-                grabbers=self.screen_grabbers,
-            )
+            return self._locked_capture()
         except CaptureError as exc:
             errors.append(str(exc))
             raise CaptureError(" ".join(errors)[:500]) from exc
@@ -946,12 +988,7 @@ class AssistantService:
 
     def _test_screen(self) -> dict[str, Any]:
         try:
-            raw = capture_screen(
-                qam_hidden=True,
-                enabled=True,
-                runtime_dir=self.store.runtime_dir,
-                grabbers=self.screen_grabbers,
-            )
+            raw = self._locked_capture()
             jpeg = to_jpeg(raw)
         except Exception as exc:  # noqa: BLE001 - the settings button shows this
             return {"ok": False, "error": str(exc)[:500]}

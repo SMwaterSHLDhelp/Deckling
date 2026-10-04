@@ -78,6 +78,7 @@ export interface HearingSettings {
   debug_audio: boolean;
   done_sound: boolean;
   thinking_tick: boolean;
+  thinking_tick_set?: boolean;
   wake_error: string;
   stt_backend: string;
   install_message: string;
@@ -98,7 +99,8 @@ export function defaultHearing(): HearingSettings {
     battery_saver: false,
     debug_audio: false,
     done_sound: true,
-    thinking_tick: false,
+    thinking_tick: true,
+    thinking_tick_set: false,
     wake_error: "",
     stt_backend: "",
     install_message: "",

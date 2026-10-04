@@ -1,17 +1,23 @@
-"""Photo banner, spoken-text cleanup, and stop-talking for rc.17."""
+"""Photo banner, spoken-text cleanup, stop-talking, and a second screen look."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ai_assistant.hearing import HearingEngine
-from ai_assistant.screen import CaptureError
+from ai_assistant.imageutil import encode_png
+from ai_assistant.screen import CaptureError, _execute, _wait_for_file
 from ai_assistant.service import AssistantService
+from ai_assistant.store import normalize_hearing
+from ai_assistant.vision import retain_latest_image
 from ai_assistant.voice import CODE_NOTE, LINK_NOTE, for_speech
 from ai_assistant.web_chat import ScreenCapture, iter_with_tools, text_tool_calls, tool_spec
-from test_voice_screen import FakeProc
+from test_voice_screen import FakeProc, _Host, _rgb
 
 
 def test_for_speech_keeps_words_and_the_full_reply() -> None:
@@ -193,3 +199,135 @@ def test_model_grab_announces_before_capture_and_respects_the_toggle(tmp_path) -
     service.save_voice({"screen_capture": True})
     assert service._offer_screen_tool(provider, "gpt-4o") is True
     assert service._offer_screen_tool(provider, "llama3:latest") is False
+
+
+def test_thinking_tick_is_on_until_the_switch_is_used() -> None:
+    assert normalize_hearing(None)["thinking_tick"] is True
+    assert normalize_hearing({})["thinking_tick"] is True
+    assert normalize_hearing({"wake_enabled": True})["thinking_tick"] is True
+    assert normalize_hearing({"thinking_tick": False, "wake_enabled": True})["thinking_tick"] is True
+    explicit = normalize_hearing({"thinking_tick": False, "thinking_tick_set": True})
+    assert explicit["thinking_tick"] is False
+    assert explicit["thinking_tick_set"] is True
+    assert normalize_hearing({"thinking_tick": True, "thinking_tick_set": True})["thinking_tick"] is True
+
+
+def test_old_screenshot_file_is_not_read_again(tmp_path) -> None:
+    path = tmp_path / "stale.png"
+    path.write_bytes(encode_png(_rgb(2, 2, (1, 2, 3)), 2, 2))
+    os.utime(path, (1, 1))
+    assert _wait_for_file(str(path), 0.2, not_before=time.time()) is None
+    fresh = tmp_path / "fresh.png"
+    fresh.write_bytes(encode_png(_rgb(2, 2, (9, 9, 9)), 2, 2))
+    assert _wait_for_file(str(fresh), 0.5, not_before=time.time() - 5) == fresh.read_bytes()
+
+
+def test_capture_timeout_kills_the_child() -> None:
+    started = time.time()
+    try:
+        _execute(["python3", "-c", "import time; time.sleep(30)"], {}, 0.3)
+    except OSError as exc:
+        assert "timed out" in str(exc)
+    else:
+        raise AssertionError("the capture tool should time out")
+    assert time.time() - started < 3
+
+
+def test_a_stuck_look_does_not_block_the_next_five(tmp_path) -> None:
+    release = threading.Event()
+    images: list[int] = []
+    posts: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length))
+            posts.append(payload)
+            count = 0
+            for message in payload.get("messages") or []:
+                content = message.get("content")
+                if isinstance(content, list):
+                    count += sum(1 for part in content if isinstance(part, dict) and part.get("type") == "image_url")
+            images.append(count)
+            if len(posts) == 1:
+                release.wait(3)
+            raw = f'data: {{"choices":[{{"delta":{{"content":"Shot {len(posts)}."}}}}]}}\n\ndata: [DONE]\n\n'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host = _Host()
+    shots = {"n": 0}
+    pngs = [encode_png(_rgb(2, 2, (index, 0, 0)), 2, 2) for index in range(1, 6)]
+
+    def grab(_context):
+        png = pngs[min(shots["n"], 4)]
+        shots["n"] += 1
+        return png
+
+    try:
+        service = AssistantService(str(tmp_path / "settings"), str(tmp_path / "runtime"), host)
+        service.screen_grabbers = [grab]
+        saved = service.save_provider(
+            {
+                "kind": "llamacpp",
+                "name": "Local",
+                "base_url": f"http://127.0.0.1:{server.server_address[1]}/v1",
+                "default_model": "gpt-4o",
+            }
+        )
+        provider_id = saved["provider"]["id"]
+
+        async def run() -> None:
+            first = service.look_at_screen(provider_id, "gpt-4o", "what am I looking at", "req-0", "Hades", "", True)
+            assert first["ok"] is True
+            await asyncio.sleep(0.15)
+            for index in range(1, 5):
+                result = service.look_at_screen(
+                    provider_id, "gpt-4o", "what am I looking at", f"req-{index}", "Hades", "", True
+                )
+                assert result["ok"] is True, result
+                for _ in range(40):
+                    if any(item.get("request_id") == f"req-{index}" and item.get("type") == "chat_done" for item in host.events):
+                        break
+                    await asyncio.sleep(0.05)
+            release.set()
+            for _ in range(40):
+                if shots["n"] >= 5 and len(posts) >= 5:
+                    break
+                await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+    finally:
+        release.set()
+        server.shutdown()
+    assert shots["n"] == 5
+    assert images[:5] == [1, 1, 1, 1, 1]
+    later = json.dumps(posts[-1])
+    assert "[earlier screenshot]" in later
+    assert later.count("data:image/jpeg;base64,") == 1
+
+
+def test_older_images_become_a_text_note() -> None:
+    first = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,YQ=="}}
+    second = {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Yg=="}}
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "first"}, first]},
+        {"role": "assistant", "content": "red"},
+        {"role": "user", "content": [{"type": "text", "text": "second"}, second]},
+    ]
+    kept = retain_latest_image(messages, multiple=False)
+    assert kept[0]["content"] == "first [earlier screenshot]"
+    assert isinstance(kept[2]["content"], list)
+    assert retain_latest_image(messages, multiple=True) == messages

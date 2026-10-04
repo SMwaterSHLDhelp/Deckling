@@ -107,6 +107,7 @@ def test_phrase_routing() -> None:
     assert classify_phrase("shut up", False, True) == "stop_talking"
     assert classify_phrase("be quiet", False, True) == "stop_talking"
     assert classify_phrase("open the map", False, True) == "ignore"
+    assert classify_phrase("what am I looking at", False, True) == "screen"
     assert classify_phrase("stop listening", False, True) == "stop_listening"
 
 

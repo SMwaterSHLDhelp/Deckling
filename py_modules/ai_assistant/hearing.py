@@ -214,6 +214,8 @@ def classify_phrase(text: str, pending: bool, speaking: bool = False) -> str:
         return "stop_listening"
     if speaking and wants_quiet(cleaned):
         return "stop_talking"
+    if speaking and wants_screen_look(text):
+        return "screen"
     if speaking:
         return "ignore"
     if cleaned in {"new chat", "start a new chat"}:

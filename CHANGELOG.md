@@ -6,6 +6,13 @@ Move items from **Unreleased** into a version section before tagging. The releas
 
 ## [Unreleased]
 
+## [0.1.0-rc.18] - 2026-10-04
+
+### Fixed
+
+- Screen help works more than once. The first look kept the in-flight request open for the whole vision stream, and the next "what am I looking at" (or Look at my screen) returned without starting a capture and without an error. A new look cancels that request and starts again. Steam's screenshot call gives up after a few seconds and the backend capture still runs. Each shot gets its own file, a file left from the previous shot is not read again, and a gamescopectl or grim process that hangs is killed. For llama.cpp and other local servers, older screenshots are removed from the request and replaced with "[earlier screenshot]", so only the new picture is sent. A failed capture or vision call is shown on screen and in a toast.
+- Soft tick while thinking is on for a new install, and for an existing install that never used that switch. Turning the switch off keeps it off.
+
 ## [0.1.0-rc.17] - 2026-10-04
 
 ### Added

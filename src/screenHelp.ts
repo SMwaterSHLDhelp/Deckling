@@ -2,6 +2,7 @@
 export const CAPTURE_STEPS = ["hide-qam", "wait", "steam-screenshot", "backend-capture"] as const;
 
 export const QAM_HIDE_MS = 380;
+export const STEAM_SHOT_MS = 2500;
 
 /** Kept in sync with py_modules/ai_assistant/vision.py SCREEN_PHRASES. */
 export const SCREEN_PHRASES = [
@@ -43,7 +44,23 @@ export async function prepareScreenCapture(
 ): Promise<string | null> {
   hideMenus();
   await wait(QAM_HIDE_MS);
-  return steamShot();
+  return withTimeout(steamShot(), STEAM_SHOT_MS);
+}
+
+function withTimeout(work: Promise<string | null>, ms: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+    );
+  });
 }
 
 export async function trySteamScreenshot(): Promise<string | null> {

@@ -94,7 +94,7 @@ export function HearingSection({
       <DeckRow layout="below" onClick={() => void save({ done_sound: hearing.done_sound === false })}>
         {hearing.done_sound === false ? "Sound when done listening: off" : "Sound when done listening: on"}
       </DeckRow>
-      <DeckRow layout="below" onClick={() => void save({ thinking_tick: !hearing.thinking_tick })}>
+      <DeckRow layout="below" onClick={() => void save({ thinking_tick: !hearing.thinking_tick, thinking_tick_set: true })}>
         {hearing.thinking_tick ? "Soft tick while thinking: on" : "Soft tick while thinking: off"}
       </DeckRow>
       {hearing.install_message ? (

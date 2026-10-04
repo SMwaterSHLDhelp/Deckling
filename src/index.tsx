@@ -15,6 +15,9 @@ export default definePlugin(() => {
     if (event.type === "toast" && event.message) {
       toaster.toast({ title: "Deckling", body: event.message, duration: 3000 });
     }
+    if (event.type === "chat_error" && event.error) {
+      toaster.toast({ title: "Deckling", body: event.error, duration: 6000 });
+    }
   });
 
   return {

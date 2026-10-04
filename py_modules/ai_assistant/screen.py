@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -114,26 +115,25 @@ def deck_display_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 def grab_external(context: CaptureContext) -> bytes | None:
     """gamescopectl and grim, as the deck user, with the gamescope Wayland display."""
-    dest = os.path.join(context.tmp_dir, f"deckling-shot-{os.getpid()}.png")
-    commands = (
-        ["gamescopectl", "screenshot", dest],
-        ["grim", "-t", "png", dest],
-    )
+    commands = (["gamescopectl", "screenshot"], ["grim", "-t", "png"])
     for argv in commands:
         if shutil.which(argv[0]) is None:
             context.errors.append(f"{argv[0]} is not installed")
             continue
+        dest = _shot_path(context.tmp_dir, "deckling-shot")
+        begun = time.time()
         try:
-            _execute(argv, context.env, context.timeout)
+            _execute([*argv, dest], context.env, context.timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             context.errors.append(f"{argv[0]}: {' '.join(str(exc).split())[:160]}")
+            unlink_temp(dest, context)
             continue
-        found = _wait_for_file(dest, min(context.timeout, 1.5))
+        found = _wait_for_file(dest, min(context.timeout, 1.5), not_before=begun)
         if found:
             unlink_temp(dest, context)
             return found
         context.errors.append(f"{argv[0]} did not write a screenshot")
-    unlink_temp(dest, context)
+        unlink_temp(dest, context)
     return None
 
 
@@ -154,8 +154,9 @@ def grab_gamescope(context: CaptureContext) -> bytes | None:
     if not sockets:
         context.errors.append(f"No gamescope socket in {runtime}")
         return None
-    dest = os.path.join(context.tmp_dir, f"gamescope-deckling-{os.getpid()}.png")
     for sock_path in sockets:
+        dest = _shot_path(context.tmp_dir, "gamescope-deckling")
+        begun = time.time()
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(context.timeout)
@@ -166,13 +167,14 @@ def grab_gamescope(context: CaptureContext) -> bytes | None:
                 except TimeoutError:
                     pass
         except OSError:
+            unlink_temp(dest, context)
             continue
-        found = _wait_for_file(dest, context.timeout)
+        found = _wait_for_file(dest, context.timeout, not_before=begun)
         if found:
             unlink_temp(dest, context)
             return found
+        unlink_temp(dest, context)
     context.errors.append("Gamescope control socket did not write a screenshot")
-    unlink_temp(dest, context)
     return None
 
 
@@ -187,7 +189,7 @@ def grab_pipewire(context: CaptureContext) -> bytes | None:
     if node_id is None:
         context.errors.append("No gamescope PipeWire video node")
         return None
-    dest = os.path.join(context.tmp_dir, f"gamescope-pw-{os.getpid()}.png")
+    dest = _shot_path(context.tmp_dir, "gamescope-pw")
     try:
         context.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "pipewire", "-i", str(node_id), "-frames:v", "1", dest])
     except (OSError, subprocess.SubprocessError):
@@ -285,11 +287,21 @@ def _gamescope_video_node(nodes: Any) -> object | None:
     return None
 
 
-def _wait_for_file(path: str, timeout: float) -> bytes | None:
+def _shot_path(directory: str, prefix: str) -> str:
+    """A new path every capture, so a leftover file cannot be read as the next shot."""
+    os.makedirs(directory, exist_ok=True)
+    stamp = f"{os.getpid()}-{time.time_ns()}"
+    return os.path.join(directory, f"{prefix}-{stamp}.png")
+
+
+def _wait_for_file(path: str, timeout: float, not_before: float = 0) -> bytes | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if os.path.isfile(path) and os.path.getsize(path) > 24:
             try:
+                if not_before and os.path.getmtime(path) + 1 < not_before:
+                    time.sleep(0.05)
+                    continue
                 with open(path, "rb") as handle:
                     data = handle.read()
             except OSError:
@@ -359,11 +371,36 @@ def _execute(args: list[str], env: dict[str, str], timeout: float) -> str:
         if not runuser:
             raise OSError("Deckling is running as root and cannot switch to the deck user for the screenshot.")
         argv = [runuser, "-u", "deck", "--preserve-environment", "--", *argv]
-    completed = subprocess.run(argv, env=env, check=False, capture_output=True, timeout=timeout)
-    if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", "replace").strip()[:200]
+    proc = subprocess.Popen(
+        argv,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        raise OSError(f"{args[0]} timed out") from exc
+    if proc.returncode != 0:
+        detail = (err or b"").decode("utf-8", "replace").strip()[:200]
         raise OSError(detail or f"{args[0]} failed")
-    return completed.stdout.decode("utf-8", "replace")
+    return (out or b"").decode("utf-8", "replace")
+
+
+def _kill_group(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _default_run(args: list[str]) -> str:

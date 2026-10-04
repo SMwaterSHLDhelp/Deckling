@@ -104,7 +104,8 @@ def normalize_hearing(raw: Any) -> dict[str, Any]:
         "battery_saver": False,
         "debug_audio": False,
         "done_sound": True,
-        "thinking_tick": False,
+        "thinking_tick": True,
+        "thinking_tick_set": False,
         "wake_error": "",
         "stt_backend": "",
         "install_message": "",
@@ -119,7 +120,11 @@ def normalize_hearing(raw: Any) -> dict[str, Any]:
     hearing["battery_saver"] = bool(hearing["battery_saver"])
     hearing["debug_audio"] = bool(hearing["debug_audio"])
     hearing["done_sound"] = bool(hearing["done_sound"])
-    hearing["thinking_tick"] = bool(hearing["thinking_tick"])
+    hearing["thinking_tick_set"] = bool(hearing.get("thinking_tick_set"))
+    if hearing["thinking_tick_set"]:
+        hearing["thinking_tick"] = bool(hearing["thinking_tick"])
+    else:
+        hearing["thinking_tick"] = True
     try:
         sensitivity = float(hearing["sensitivity"])
     except (TypeError, ValueError):

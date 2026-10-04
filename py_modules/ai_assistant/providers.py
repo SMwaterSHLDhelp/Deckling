@@ -515,9 +515,10 @@ def _iter_openai(
     if provider.get("kind") in {"openai", "hermes", "xai"}:
         require_credentials(provider)
     token_field = "max_completion_tokens" if provider.get("kind") == "openai" else "max_tokens"
+    outbound = vision.retain_latest_image(messages, multiple=vision.keeps_multiple_images(str(provider.get("kind") or "")))
     body = {
         "model": model,
-        "messages": vision.openai_messages(messages, image),
+        "messages": vision.openai_messages(outbound, image),
         "stream": True,
         token_field: _max_tokens(provider),
     }
@@ -660,9 +661,10 @@ def _iter_ollama(
     cancel: threading.Event,
     image: bytes | None = None,
 ) -> Iterator[str]:
+    outbound = vision.retain_latest_image(messages, multiple=False)
     body = {
         "model": model,
-        "messages": vision.ollama_messages(messages, image),
+        "messages": vision.ollama_messages(outbound, image),
         "stream": True,
         "options": {"num_predict": _max_tokens(provider)},
     }

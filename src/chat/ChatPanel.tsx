@@ -427,8 +427,15 @@ export function ChatPanel() {
   }, [state.messages, streaming]);
 
   const look = async (question: string, nextModel?: string) => {
-    if (streaming) {
-      return;
+    if (streaming && requestRef.current) {
+      const previous = requestRef.current;
+      requestRef.current = null;
+      setStreaming(false);
+      try {
+        await cancelChat(previous);
+      } catch {
+        // The previous look can stay stuck. This one still starts.
+      }
     }
     if (!providerId) {
       setError("Add a provider in settings first");

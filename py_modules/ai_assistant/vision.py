@@ -126,6 +126,62 @@ def _b64(image: bytes) -> str:
     return base64.b64encode(image).decode("ascii")
 
 
+EARLIER_SCREENSHOT = "[earlier screenshot]"
+_MULTI_IMAGE_KINDS = {"openai", "anthropic", "gemini", "xai"}
+
+
+def keeps_multiple_images(kind: str) -> bool:
+    """Cloud vision models can take several pictures. Local servers keep the latest one."""
+    return str(kind or "") in _MULTI_IMAGE_KINDS
+
+
+def _message_has_image(message: dict[str, Any]) -> bool:
+    if message.get("images"):
+        return True
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in {"image_url", "image"} or "inlineData" in part or "inline_data" in part:
+            return True
+    return False
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    bits = [str(part.get("text") or "") for part in content if isinstance(part, dict) and part.get("text")]
+    return " ".join(bit for bit in bits if bit)
+
+
+def retain_latest_image(messages: list[dict[str, Any]], *, multiple: bool) -> list[dict[str, Any]]:
+    """Drop older screenshots so a later look does not resend them."""
+    if multiple:
+        return messages
+    indexes = [index for index, message in enumerate(messages) if _message_has_image(message)]
+    if len(indexes) <= 1:
+        return messages
+    keep = indexes[-1]
+    updated: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        if index not in indexes or index == keep:
+            updated.append(message)
+            continue
+        text = _message_text(message).strip()
+        if EARLIER_SCREENSHOT not in text:
+            text = f"{text} {EARLIER_SCREENSHOT}".strip()
+        copied = dict(message)
+        copied["content"] = text
+        copied.pop("images", None)
+        updated.append(copied)
+    return updated
+
+
 def openai_messages(messages: list[dict[str, Any]], image: bytes | None) -> list[dict[str, Any]]:
     if not image:
         return messages

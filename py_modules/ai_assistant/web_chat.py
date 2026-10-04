@@ -22,6 +22,7 @@ from .providers import (
     require_credentials,
 )
 from .sse import iter_json_lines, iter_sse_json
+from .vision import keeps_multiple_images, retain_latest_image
 from .web import WebClient
 
 TOOL_KINDS = {"openai", "anthropic", "gemini", "xai", "ollama", "llamacpp", "hermes", "custom"}
@@ -298,7 +299,7 @@ def _openai_tools(
             return
         body = {
             "model": model,
-            "messages": working,
+            "messages": retain_latest_image(working, multiple=keeps_multiple_images(str(provider.get("kind") or ""))),
             "stream": True,
             "tools": tools,
             token_field: _max_tokens(provider),
@@ -346,7 +347,12 @@ def _openai_tools(
                 working.append(_openai_shot(image))
     if cancel.is_set():
         return
-    body = {"model": model, "messages": working, "stream": True, token_field: _max_tokens(provider)}
+    body = {
+        "model": model,
+        "messages": retain_latest_image(working, multiple=keeps_multiple_images(str(provider.get("kind") or ""))),
+        "stream": True,
+        token_field: _max_tokens(provider),
+    }
     yield from _stream_openai(provider, url, body, timeout, cancel, notify=notify)
 
 
