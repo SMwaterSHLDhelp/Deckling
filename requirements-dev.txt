@@ -1,4 +1,4 @@
 # CI and local checks only. The Decky plugin and bridge/claude_bridge.py use the
 # Python standard library so they can run on the Deck without pip.
-ruff==0.16.10
+ruff==0.17.1
 pytest==9.1.1
