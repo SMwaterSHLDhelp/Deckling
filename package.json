@@ -29,16 +29,16 @@
   "homepage": "https://github.com/SMwaterSHLDhelp/Deckling#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
-    "@decky/ui": "^4.13.0",
-    "@rollup/rollup-linux-x64-musl": "^4.64.7",
+    "@decky/ui": "^4.16.0",
+    "@rollup/rollup-linux-x64-musl": "^4.65.0",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "eslint": "^10.12.0",
+    "eslint": "^10.13.0",
     "globals": "^17.13.0",
-    "rollup": "^4.64.7",
+    "rollup": "^4.65.0",
     "@typescript/native": "npm:typescript@^7.0.2",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.71.2"
+    "typescript-eslint": "^8.72.0"
   },
   "dependencies": {
     "@decky/api": "^1.1.3",
